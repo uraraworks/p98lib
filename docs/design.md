@@ -1394,3 +1394,136 @@ printf ("\n\x1B[>1l\x1B[>5l");  /* 終了時、[>1lで戻す */
   ことは検討したが、既に実測済みで動いている方式を変える理由が無いため
   見送った)。
 - 実機での確認は行っていない(他の節と同じ限界)。
+
+## MAG形式対応(2026-09後半、公開デモの主役をKYA→MAGへ交代)
+
+KYAはp98lib独自の解析(このプロジェクトで実測して仕様を決めた形式)であり、
+公開しても作者本人以外は変換できない。**MAGは当時のPC-98標準の画像形式**
+(MAKIchan MAKI02)なので、公開して他の人にも使ってもらう変換ツールの主役は
+こちらにした。KYA対応(`tools/kya_convert.mjs`)は作者向けとしてそのまま残す。
+
+### mag.tsの取り込み方: コピーしてJS化した(TSのまま読む/ビルド済みを置く、との比較)
+
+デコーダの実装はユーザー本人の著作物`WebPaint98/src/mag/mag.ts`の
+`decodeMag()`を元にした。取り込み方として3通り検討した:
+
+1. **TSファイルをそのまま読む**: 採用しなかった。Node自体がTypeScriptを
+   読めるようになったのはごく最近(2026-09時点でNode 22以降の実験的機能、
+   バージョンによって挙動が違う)で、"公開したとき他の人の環境で動くか"
+   という基準に照らすと、実行側のNodeバージョンに依存する不安定な前提を
+   持ち込むことになる。ts-node/tsx等の追加ツールチェーンを要求するのも
+   同じ理由で避けた。
+2. **WebPaint98のビルド成果物を参照する**: 採用しなかった。
+   `tools/build.mjs`が`../WorkbenchNP2`を相対パス参照しているのと同じ
+   理由付けは効かない(WorkbenchNP2はp98libのビルドに必須の依存だが、
+   WebPaint98はp98libとは無関係な別プロジェクトで、依存を増やしたくない)。
+3. **型注釈を外してJS化し、`tools/mag_decode.mjs`としてコピーする**:
+   採用した。ロジックは一切変えていない、機械的な変換(型注釈の削除)に
+   留めてあるため、移植ミスのリスクは低い。正しく移植できたかは
+   (a) `tools/mag_decode.mjs selftest`(ラウンドトリップ検査)、
+   (b) 実際にNode(v25、TypeScript実験サポートあり)で元の`mag.ts`を
+   直接動かして同じ入力に対し同じ出力になることを確認、の両方で確かめた
+   (詳細はdocs/verify-log.md)。エンコード側(`encodeMag`)は今回のスコープ
+   (既存MAGを読むだけ)では不要なため移植していない。
+
+### 【最大の発見】KYAとMAGは「同じ絵のはず」という前提が誤りだった
+
+コーディネーターの指示は「MITEI2.KYAとMITEI2.MAGは同じ絵なので、両方を
+変換した結果のバイト列が一致することを検査にする」だった。実際にやってみると:
+
+- **パレット(16色)は完全一致した**(`tools/compare_kya_mag.mjs`、
+  MITEI2・MITEI3とも0/16不一致)。MAGのパレットがファイル上G,R,Bの順、
+  KYAはR,G,Bの順、という理解も`decodeMag()`の実装・実測の両方で確認できた。
+- **しかし画素の内容(パレット番号)は一致しなかった**(MITEI2は
+  256000画素中252668画素が不一致、MITEI3は196971画素が不一致)。
+
+最初はデコーダのバグを疑ったが、`tools/mag_decode.mjs`単体で
+`MITEI2.MAG`を復号すると、パレット番号が**0と15の2値しか出てこない**
+(256000画素が全て0か15)という不自然な結果になった。同じロジックを
+別経路(ユーザー本人の著作物`_local/.../MAGL.C`、当時のCデコーダ)で
+JS移植して実行しても同じ結果になり、さらに`WebPaint98`の既存参照素材
+(`reference/private/MPS.MAG`、本家MPS.EXEが書いた実データ)を復号すると
+正しく多色の画像(ロゴ)が出ることを確認した(`test/out/mps.png`)ため、
+「デコーダの実装自体は正しいが、`MITEI2.MAG`というファイルが本当に
+2色しか持っていないのでは」という疑いに変わった。
+
+**この疑いを、ユーザー本人の1996年当時のMAGローダー(`_local/.../MAGL.C`
+をコンパイル済みの`MAGL.EXE`)を実際にFreeDOS(98)+WebNP2で実行し、
+`MITEI2.MAG`を読み込ませてVRAMを直接ダンプすることで確認した**
+(`tools/verify.mjs`とは別の使い捨てハーネス、コミットには残していない)。
+結果、実機相当のこのローダーが書いたVRAMも、4プレーン(B/R/G/I)が
+常に同一の値になっており(=白黒2色しか使っていない)、
+`tools/mag_decode.mjs`(および`mag.ts`)のデコード結果と完全に一致した。
+**つまりデコーダは正しく、`MITEI2.MAG`というファイル自体が実際に
+白黒2色しか持っていない**ことが確定した。
+
+さらに逆方向の確認として`MITEI3`の組も調べたところ、**今度は逆に
+KYA側(`MITEI3.KYA`)が白黒2色、MAG側(`MITEI3.MAG`)が多色**という、
+`MITEI2`の組と正反対の非対称な結果になっていた(目視のモザイク画像でも
+確認: `MITEI3.KYA`は全キャラが白シルエット、`MITEI3.MAG`は多色)。
+この非対称性から、「同じ名前のKYA/MAGファイルは常に同じ画素を持つ」
+という当初の前提そのものが、この2組のデータについては成り立たないと
+判断した。原因(保存時期の違い、別ツールでの書き出し、等)は不明。
+**直すべきコード上の問題ではなかった。**
+
+### デモ素材の選定: MITEI3.MAG(多色が使える方)を採用
+
+上記の理由により、`samples/walk2.c`のキャラクタ素材は
+**MITEI3.MAG**(多色、8列×8段の同じレイアウト、[up*2,down*2,left*4]の
+並びもKYA側と同じことを確認済み)から切り出した。地面タイルは
+引き続き**MITEI2.KYA**由来のまま(`MITEI3.MAG`のタイル相当領域
+(x≧288、y<256)は実測すると白黒2色しか無く、タイルには使えなかったため)。
+
+**KYA由来のタイルとMAG由来のキャラを混在させても大丈夫か?**
+`MITEI2.KYA`のパレットと`MITEI3.MAG`のパレットが完全一致することを
+実測で確認した(`tools/compare_kya_mag.mjs`と同じ手法)ため、同じ
+パレット(`samples/mag_assets.h`の`MAG_PALETTE`)で問題なく共存できる。
+
+### 実装(`tools/mag_convert.mjs`)
+
+`tools/kya_convert.mjs`と同じ構成(`buildAssetSet`/`stringifyAssets`/
+`generateAssets`に相当する`buildAssetSetFromMag`/`stringifyMagAssets`/
+`generateMagAssets`)に揃えた。汎用のマスク計算・水平反転・機械検証
+(`computeMask`/`mirrorRectHorizontal`/`verifyMirror`/`emitCArray`)は
+`tools/kya_convert.mjs`からそのままimportして再利用している(コピーして
+二重管理にしない)。
+
+- `extractRectFromMag(decoded, x, y, w, h)`: デコード済みMAGの
+  チャンキー画素配列(1byte=1px、0-15)から、KYA側と同じ`rect`形式
+  ({w,h,wBytes,planes:[4本]})を作る。ビット重みの規約(bit0=B,bit1=R,
+  bit2=G,bit3=I)もKYAと共通。
+- `verifyRectAgainstMag`: 切り出した4プレーンから画素を再構成し、
+  元のmag.pixelsと1画素も違わず一致することを確認する(KYA側の
+  `verifyRectAgainstSource`に相当)。`selftest`コマンドで8x8=64枚
+  (MITEI3.MAGの populated な範囲)全数を検査している。
+- 故障注入(`--broken-swap-rg`): R/Gプレーンを入れ替えた版を生成できる
+  (KYA側と同じ考え方)。
+
+### 検証(`tools/verify.mjs`、詳細は`docs/verify-log.md`)
+
+- `tools/mag_decode.mjs`のセルフテスト(`node tools/mag_decode.mjs selftest`)。
+- `tools/mag_convert.mjs`のセルフテスト(64枚のラウンドトリップ検査)。
+- KYA/MAG突き合わせ(`compareKyaMag`): パレット一致を合否判定に使い、
+  画素の相違は上記の理由と共に情報として記録する(バグの指標としては
+  使わない。理由は上記の通り検証済み)。
+- `tests/probe_walk2_assets.c`: タイル(KYA由来)+キャラ4方向(MAG由来)が
+  VRAM上で変換結果と一致することを確認(`probe_walk2_assets.c`は
+  `kya_assets.h`と`mag_assets.h`の両方をincludeする)。
+- 故障注入: `tools/mag_convert.mjs generate --broken-swap-rg`で
+  R/Gプレーンを入れ替えた版(`tests/mag_assets_broken_rg.h`、
+  `tests/probe_walk2_assets_broken.c`)を使うと、VRAM照合がFAILする
+  (検出できる)ことを確認した。
+- `samples/walk2.c`のキャラをMAG由来に差し替えた後も、移動・アニメ切替・
+  背景復元・ESC後DOS生存の全検査が通過することを確認済み(163件、
+  全てOK。素材が変わった(MITEI2→MITEI3)ため見た目自体は変わったが、
+  変換ロジックとしての正しさ(VRAM実値との一致)は変わらず確認できている)。
+
+### 未確認・既知の限界
+
+- KYA/MAGの画素内容がなぜ非対称に食い違うのか(保存時期・ツールの違い等)
+  は未確認のまま。
+- `MITEI2.MAG`・`MITEI3.KYA`(それぞれ白黒2色側)は、今回のデモには
+  使っていない(データとしては読めるが色情報が無いため)。
+- `encodeMag`(MAGの書き出し)は移植していない(今回のスコープ外)。
+- 実機での確認は行っていない(他の節と同じ限界。ただしMAGL.EXEの実行は
+  「実機相当のローダーの挙動」という意味で通常より強い根拠になっている)。

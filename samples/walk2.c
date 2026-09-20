@@ -1,8 +1,23 @@
-/* p98lib デモ2: 実素材(ユーザー本人のオリジナル作品、C-GAMES/SAKA/MITEI2.KYA)を
+/* p98lib デモ2: 実素材(ユーザー本人のオリジナル作品、C-GAMES/SAKA由来)を
  * 使った、タイル背景+4方向歩行アニメのデモ。
  *
- * 素材はKYA形式のフルスクリーンダンプから tools/kya_convert.mjs で切り出した
- * ものを samples/kya_assets.h (自動生成、手編集しないこと)に持つ。
+ * 【2026-09後半、素材をMAG形式(当時の標準フォーマット)へ主役交代】
+ * キャラクタは MITEI3.MAG(MAG=MAKIchan MAKI02形式) から tools/mag_convert.mjs
+ * で切り出したもの(samples/mag_assets.h、自動生成、手編集しないこと)。
+ * KYA(p98lib独自形式)はユーザー本人しか変換できないため、公開して他の人にも
+ * 使ってもらう変換ツールとしてはMAGを主役にした。KYA対応は作者向けとして
+ * tools/kya_convert.mjsに残してある。
+ *
+ * タイル(地面)は引き続きKYA側(MITEI2.KYA、samples/kya_assets.h)を使う。
+ * 理由: MITEI3.MAGのタイル相当領域(元のMITEI2.KYAでタイルがあった座標)は
+ * 実測するとモノクロ(白黒2色)しか使っておらず、タイル素材としては使えな
+ * かった(docs/design.md「MAG形式対応」節参照。KYA変換ツールのバグではなく、
+ * ユーザー本人の1996年当時の保存データそのものがそうなっていたことを、
+ * 実機相当のMAGL.EXEをエミュレータで実行してVRAMの実値を見て確認した)。
+ * パレットはMAG側(MAG_PALETTE)を使う。MITEI2.KYAのパレットと1バイトも
+ * 違わず一致することを確認済み(tools/compare_kya_mag.mjs)なので、
+ * KYA由来のタイルとMAG由来のキャラを同じパレットで問題なく混在できる。
+ *
  *   - キャラ: 32x32、UP/DOWN 各2フレーム、LEFT 4フレーム、RIGHT はLEFTの
  *     水平反転(元データに右向きの絵は無いため、変換ツール側で生成)。
  *   - 地面: 16x16タイル2種(草・レンガ)。画面全体(40列x25段)へ敷き詰める。
@@ -19,6 +34,7 @@
  */
 #include "p98.h"
 #include "kya_assets.h"
+#include "mag_assets.h"
 
 #define SCREEN_W 640
 #define SCREEN_H 400
@@ -40,8 +56,8 @@ typedef enum { DIR_DOWN = 0, DIR_UP = 1, DIR_LEFT = 2, DIR_RIGHT = 3 } dir_t;
 
 static void apply_palette(void) {
     int i;
-    for (i = 0; i < KYA_PALETTE_COUNT; i++) {
-        p98_set_palette(i, KYA_PALETTE[i][0], KYA_PALETTE[i][1], KYA_PALETTE[i][2]);
+    for (i = 0; i < MAG_PALETTE_COUNT; i++) {
+        p98_set_palette(i, MAG_PALETTE[i][0], MAG_PALETTE[i][1], MAG_PALETTE[i][2]);
     }
 }
 
@@ -61,10 +77,10 @@ static void draw_tiled_background(void) {
 /* SmallerCのswitch文はp98lib内で実績が無いため(既存コードは全てif/elseで
  * 統一している)、未検証のパターンを新規に持ち込まないよう安全側に倒してif/elseにした。 */
 static const p98_sprite_t *current_sprite(dir_t dir, int step) {
-    if (dir == DIR_UP)    return KYA_WALK_UP[step % 2];
-    if (dir == DIR_DOWN)  return KYA_WALK_DOWN[step % 2];
-    if (dir == DIR_LEFT)  return KYA_WALK_LEFT[step % 4];
-    return KYA_WALK_RIGHT[step % 4];
+    if (dir == DIR_UP)    return MAG_WALK_UP[step % 2];
+    if (dir == DIR_DOWN)  return MAG_WALK_DOWN[step % 2];
+    if (dir == DIR_LEFT)  return MAG_WALK_LEFT[step % 4];
+    return MAG_WALK_RIGHT[step % 4];
 }
 
 int main(void) {

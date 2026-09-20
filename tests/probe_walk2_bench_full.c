@@ -6,6 +6,7 @@
  */
 #include "p98.h"
 #include "kya_assets.h"
+#include "mag_assets.h"
 
 #define SCREEN_W 640
 #define SCREEN_H 400
@@ -34,7 +35,7 @@ int main(void) {
         int x = ((iter * 37) % 76) * 8;
         int y = ((iter * 11) % 46) * 8;
         draw_tiled_background();
-        p98_draw_sprite(KYA_WALK_DOWN[iter % 2], x, y);
+        p98_draw_sprite(MAG_WALK_DOWN[iter % 2], x, y);
     }
 
     p98_quit();

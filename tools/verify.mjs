@@ -12,6 +12,8 @@ import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildProgram } from './build.mjs';
 import { buildAssetSet } from './kya_convert.mjs';
+import { buildAssetSetFromMag } from './mag_convert.mjs';
+import { compareKyaMag } from './compare_kya_mag.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(HERE);
@@ -220,11 +222,53 @@ async function withPage(browser, url, fn) {
 }
 
 const KYA_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA/MITEI2.KYA');
+const MAG_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA/MITEI3.MAG');
 
 async function main() {
   const results = [];
   console.log('--- ビルド ---');
-  const assetSet = await buildAssetSet(KYA_PATH);
+  const assetSet = await buildAssetSet(KYA_PATH); // タイル(KYA由来)用に残す
+  const magAssetSet = await buildAssetSetFromMag(MAG_PATH); // キャラ(MAG由来、2026-09後半に主役交代)用
+
+  // ---- KYA経由とMAG経由の突き合わせ(コーディネーター指示の「今回の肝」) ----
+  // 「MITEI2.KYAとMITEI2.MAGは同じ絵のはず」という前提で両方を変換し、
+  // バイト列(パレット・全画素のパレット番号)が一致するかを機械的に確認する。
+  // 実測した結果、パレットは完全一致するが、画素の内容は一致しなかった
+  // (詳細はdocs/design.md「MAG形式対応」節・docs/verify-log.md参照)。
+  // 「一致しない場合はVRAMに出して実値で確かめる」を実行した結果:
+  //   - ユーザー本人の1996年当時のCローダー(_local/.../MAGL.C、コンパイル
+  //     済みのMAGL.EXE)を本物のFreeDOS(98)+WebNP2で実行し、MITEI2.MAGを
+  //     読み込ませてVRAMを直接ダンプしたところ、B/R/G/Iの4プレーンが
+  //     常に同一の値になる(=白黒2色しか使っていない)ことを確認した。
+  //   - つまりtools/mag_decode.mjs(mag.tsの移植)のデコード結果は
+  //     **実機相当のローダーと一致しており、デコーダのバグではない**。
+  //     MITEI2.MAGというファイル自体が、MITEI2.KYAと違って白黒2色しか
+  //     持っていない(理由は不明。当時の保存時の事情と思われる)。
+  //   - 逆にMITEI3の組は、KYA側が白黒2色、MAG側が多色という**逆の**
+  //     組み合わせだった(こちらもMAGL.EXE実行と目視で確認)。
+  // この非対称な結果から、「同じ名前のKYA/MAGは常に同じ画素を持つ」という
+  // 前提そのものが誤りだったと判断した(直すべきコードの問題ではない)。
+  // そのため、デモの素材は画素が実際に多色で使えるMITEI3.MAGを採用した
+  // (samples/mag_assets.h、上のmagAssetSet)。
+  console.log('\n--- KYA経由とMAG経由の突き合わせ(MITEI2/MITEI3、実測結果をそのまま記録) ---');
+  for (const [label, kyaName, magName] of [
+    ['MITEI2', 'MITEI2.KYA', 'MITEI2.MAG'],
+    ['MITEI3', 'MITEI3.KYA', 'MITEI3.MAG'],
+  ]) {
+    const report = await compareKyaMag(
+      resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA', kyaName),
+      resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA', magName),
+    );
+    const paletteOk = report.paletteMismatch === 0;
+    results.push({
+      label: `[KYA/MAG突き合わせ] ${label}: パレット16色が完全一致`,
+      ok: paletteOk, actual: `${report.paletteMismatch}/16不一致`, expected: '0/16不一致',
+    });
+    console.log(`${paletteOk ? 'OK  ' : 'FAIL'} [KYA/MAG突き合わせ] ${label} パレット一致 (${report.paletteMismatch}/16不一致)`);
+    console.log(`      ${label} 画素の一致: ${report.totalPixels - report.pixelMismatch}/${report.totalPixels}` +
+      `(不一致${report.pixelMismatch}件。既知の相違、MAGL.EXE実機相当で確認済み。docs/design.md参照。バグではないため合否判定には使わない)`);
+  }
+
   const [
     fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe,
     spriteExe, spriteNoMaskExe, spriteNoClipExe, spriteBenchExe, spriteBench0Exe,
@@ -1098,44 +1142,46 @@ async function main() {
       console.log(`${alive ? 'OK  ' : 'FAIL'} EGC使用後、p98_quit後にVERを実行してプロンプトが返る`);
     });
 
-    // ---- ここから: KYA実素材(MITEI2.KYA、C-GAMES/SAKA由来)を使ったデモ2 ----
+    // ---- ここから: 実素材(C-GAMES/SAKA由来)を使ったデモ2。2026-09後半、
+    // キャラをMAG(MITEI3.MAG、当時の標準フォーマット)由来へ主役交代。
+    // タイルはKYA(MITEI2.KYA)由来のまま(理由はdocs/design.md参照)。 ----
 
-    console.log('\n--- KYA変換アセットの実値検証(probe_walk2_assets: タイル2種+4方向キャラがVRAM上で変換結果と一致) ---');
+    console.log('\n--- 変換アセットの実値検証(probe_walk2_assets: タイル2種(KYA由来)+4方向キャラ(MAG由来)がVRAM上で変換結果と一致) ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/walk2assets.xdf`, 'PROBE_WA', { waitMs: 2000 }), PORT);
       if (errors.length) console.log('page errors:', errors);
 
       const checks = [
-        ['地面タイル(草)', assetSet.ground.rect, 0, 0, 16, 16],
-        ['地面タイル(レンガ)', assetSet.accent.rect, 16, 0, 16, 16],
-        ['キャラDOWN[0]', assetSet.down[0].rect, 64, 64, 32, 32],
-        ['キャラLEFT[0]', assetSet.leftFrames[0].rect, 160, 64, 32, 32],
-        ['キャラRIGHT[0](左向きの水平反転)', assetSet.rightFrames[0].rect, 256, 64, 32, 32],
-        ['キャラUP[0]', assetSet.up[0].rect, 352, 64, 32, 32],
+        ['地面タイル(草、KYA由来)', assetSet.ground.rect, 0, 0, 16, 16],
+        ['地面タイル(レンガ、KYA由来)', assetSet.accent.rect, 16, 0, 16, 16],
+        ['キャラDOWN[0](MAG由来)', magAssetSet.down[0].rect, 64, 64, 32, 32],
+        ['キャラLEFT[0](MAG由来)', magAssetSet.leftFrames[0].rect, 160, 64, 32, 32],
+        ['キャラRIGHT[0](MAG由来、左向きの水平反転)', magAssetSet.rightFrames[0].rect, 256, 64, 32, 32],
+        ['キャラUP[0](MAG由来)', magAssetSet.up[0].rect, 352, 64, 32, 32],
       ];
       for (const [label, expectedRect, x, y, w, h] of checks) {
         const actual = await readVramRect(page, x, y, w, h);
         const ok = rectPlanesEqual(actual, expectedRect);
-        results.push({ label: `[kya変換] ${label}(x=${x},y=${y})がVRAM上で変換結果と一致`, ok, actual: ok ? '一致' : '不一致', expected: '一致' });
-        console.log(`${ok ? 'OK  ' : 'FAIL'} [kya変換] ${label} が変換結果と一致`);
+        results.push({ label: `[変換] ${label}(x=${x},y=${y})がVRAM上で変換結果と一致`, ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [変換] ${label} が変換結果と一致`);
       }
     });
 
-    console.log('\n--- 故障注入: probe_walk2_assets_broken(R/Gプレーン入替版)はVRAM照合でFAILするはず ---');
+    console.log('\n--- 故障注入: probe_walk2_assets_broken(MAG変換のR/Gプレーン入替版)はVRAM照合でFAILするはず ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/walk2assetsbroken.xdf`, 'PROBE_WA', { waitMs: 2000 }), PORT);
       if (errors.length) console.log('page errors:', errors);
 
-      // 正しい期待値(assetSet、R/G入替前)と突き合わせる。故障注入版は
+      // 正しい期待値(magAssetSet、R/G入替前)と突き合わせる。故障注入版は
       // R/Gプレーンを入れ替えて生成してあるため、キャラの絵(4プレーンとも
       // 使う箇所がある)は一致しないはず。
       const actual = await readVramRect(page, 64, 64, 32, 32);
-      const mismatched = !rectPlanesEqual(actual, assetSet.down[0].rect);
+      const mismatched = !rectPlanesEqual(actual, magAssetSet.down[0].rect);
       results.push({
-        label: '[kya変換故障注入] R/Gプレーン入替版はキャラDOWN[0]が正しい変換結果と一致しない(検査が故障を検出できること)',
+        label: '[MAG変換故障注入] R/Gプレーン入替版はキャラDOWN[0]が正しい変換結果と一致しない(検査が故障を検出できること)',
         ok: mismatched, actual: mismatched ? '不一致(検出できた)' : '一致してしまった(検出できていない)', expected: '不一致',
       });
-      console.log(`${mismatched ? 'OK  ' : 'FAIL'} [kya変換故障注入] R/G入替を検出`);
+      console.log(`${mismatched ? 'OK  ' : 'FAIL'} [MAG変換故障注入] R/G入替を検出`);
     });
 
     console.log('\n--- サンプル2: walk2(タイル背景+実素材、4方向歩行アニメ。samples/walk2.c) ---');
@@ -1200,7 +1246,7 @@ async function main() {
       // 1) 起動直後: DOWN[0]が初期位置に、タイル背景の上に合成されて出ている。
       {
         const actual = await readVramRect(page, START_X, START_Y, 32, 32);
-        const expected = expectedComposite(START_X, START_Y, assetSet.down[0]);
+        const expected = expectedComposite(START_X, START_Y, magAssetSet.down[0]);
         const ok = rectPlanesEqual(actual, expected);
         results.push({ label: '[walk2] 起動直後: キャラがDOWN[0]でタイル背景上の初期位置に出ている', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 起動直後の見た目`);
@@ -1214,7 +1260,7 @@ async function main() {
       const afterRightX = START_X + 32;
       {
         const actual = await readVramRect(page, afterRightX, START_Y, 32, 32);
-        const expected = expectedComposite(afterRightX, START_Y, assetSet.rightFrames[2]);
+        const expected = expectedComposite(afterRightX, START_Y, magAssetSet.rightFrames[2]);
         const ok = rectPlanesEqual(actual, expected);
         results.push({ label: '[walk2] RIGHTを2回: 向きがRIGHTに変わりアニメがコマ2へ進む', ok, actual: ok ? '一致' : '不一致', expected: '一致(RIGHT[2])' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] RIGHT移動+アニメ切替`);
@@ -1236,7 +1282,7 @@ async function main() {
       const afterDownY = START_Y + TILE;
       {
         const actual = await readVramRect(page, afterRightX, afterDownY, 32, 32);
-        const expected = expectedComposite(afterRightX, afterDownY, assetSet.down[1]);
+        const expected = expectedComposite(afterRightX, afterDownY, magAssetSet.down[1]);
         const ok = rectPlanesEqual(actual, expected);
         results.push({ label: '[walk2] DOWNを1回: 向きがDOWNに変わりアニメがコマ1(DOWN[1])になる', ok, actual: ok ? '一致' : '不一致', expected: '一致(DOWN[1])' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] DOWN移動+アニメ切替`);
@@ -1247,7 +1293,7 @@ async function main() {
       const afterLeftX = afterRightX - TILE;
       {
         const actual = await readVramRect(page, afterLeftX, afterDownY, 32, 32);
-        const expected = expectedComposite(afterLeftX, afterDownY, assetSet.leftFrames[0]);
+        const expected = expectedComposite(afterLeftX, afterDownY, magAssetSet.leftFrames[0]);
         const ok = rectPlanesEqual(actual, expected);
         results.push({ label: '[walk2] LEFTを1回: 向きがLEFTに変わる(LEFT[0])', ok, actual: ok ? '一致' : '不一致', expected: '一致(LEFT[0])' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] LEFT移動+向き切替`);
@@ -1258,7 +1304,7 @@ async function main() {
       const afterUpY = afterDownY - TILE;
       {
         const actual = await readVramRect(page, afterLeftX, afterUpY, 32, 32);
-        const expected = expectedComposite(afterLeftX, afterUpY, assetSet.up[1]);
+        const expected = expectedComposite(afterLeftX, afterUpY, magAssetSet.up[1]);
         const ok = rectPlanesEqual(actual, expected);
         results.push({ label: '[walk2] UPを1回: 向きがUPに変わりアニメがコマ1(UP[1])になる', ok, actual: ok ? '一致' : '不一致', expected: '一致(UP[1])' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] UP移動+アニメ切替`);

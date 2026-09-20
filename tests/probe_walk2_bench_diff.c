@@ -7,6 +7,7 @@
  */
 #include "p98.h"
 #include "kya_assets.h"
+#include "mag_assets.h"
 
 #define SCREEN_W 640
 #define SCREEN_H 400
@@ -38,7 +39,7 @@ int main(void) {
     for (iter = 0; iter < BENCH_FRAMES; iter++) {
         int x = ((iter * 37) % 76) * 8;
         int y = ((iter * 11) % 46) * 8;
-        p98_draw_sprite_diff(KYA_WALK_DOWN[iter % 2], x, y);
+        p98_draw_sprite_diff(MAG_WALK_DOWN[iter % 2], x, y);
     }
 
     p98_quit();
