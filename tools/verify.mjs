@@ -11,7 +11,6 @@ import { createRequire } from 'node:module';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildProgram } from './build.mjs';
-import { buildAssetSet } from './kya_convert.mjs';
 import { buildAssetSetFromMag } from './mag_convert.mjs';
 import { compareKyaMag } from './compare_kya_mag.mjs';
 
@@ -221,14 +220,15 @@ async function withPage(browser, url, fn) {
   }
 }
 
-const KYA_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA/MITEI2.KYA');
-const MAG_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA/MITEI3.MAG');
+// 2026-09後半: デモ素材をORIGINAL/KYARA-03.MAGへ差し替えた(docs/assets.md参照。
+// ユーザー本人のオリジナル作品と確認済み。MITEI2.KYAと同じ配置だが、
+// 背景タイルの描き込みが多くキャラの色数も多い「色付き完全版」)。
+const MAG_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/ORIGINAL/KYARA-03.MAG');
 
 async function main() {
   const results = [];
   console.log('--- ビルド ---');
-  const assetSet = await buildAssetSet(KYA_PATH); // タイル(KYA由来)用に残す
-  const magAssetSet = await buildAssetSetFromMag(MAG_PATH); // キャラ(MAG由来、2026-09後半に主役交代)用
+  const magAssetSet = await buildAssetSetFromMag(MAG_PATH); // キャラ・タイルとも(2026-09後半、KYARA-03.MAG由来に統一)
 
   // ---- KYA経由とMAG経由の突き合わせ(コーディネーター指示の「今回の肝」) ----
   // 「MITEI2.KYAとMITEI2.MAGは同じ絵のはず」という前提で両方を変換し、
@@ -1146,14 +1146,14 @@ async function main() {
     // キャラをMAG(MITEI3.MAG、当時の標準フォーマット)由来へ主役交代。
     // タイルはKYA(MITEI2.KYA)由来のまま(理由はdocs/design.md参照)。 ----
 
-    console.log('\n--- 変換アセットの実値検証(probe_walk2_assets: タイル2種(KYA由来)+4方向キャラ(MAG由来)がVRAM上で変換結果と一致) ---');
+    console.log('\n--- 変換アセットの実値検証(probe_walk2_assets: タイル2種+4方向キャラ(いずれもKYARA-03.MAG由来)がVRAM上で変換結果と一致) ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/walk2assets.xdf`, 'PROBE_WA', { waitMs: 2000 }), PORT);
       if (errors.length) console.log('page errors:', errors);
 
       const checks = [
-        ['地面タイル(草、KYA由来)', assetSet.ground.rect, 0, 0, 16, 16],
-        ['地面タイル(レンガ、KYA由来)', assetSet.accent.rect, 16, 0, 16, 16],
+        ['地面タイル(草)', magAssetSet.ground.rect, 0, 0, 16, 16],
+        ['地面タイル(レンガ)', magAssetSet.accent.rect, 16, 0, 16, 16],
         ['キャラDOWN[0](MAG由来)', magAssetSet.down[0].rect, 64, 64, 32, 32],
         ['キャラLEFT[0](MAG由来)', magAssetSet.leftFrames[0].rect, 160, 64, 32, 32],
         ['キャラRIGHT[0](MAG由来、左向きの水平反転)', magAssetSet.rightFrames[0].rect, 256, 64, 32, 32],
@@ -1196,7 +1196,7 @@ async function main() {
 
       // samples/walk2.c と同じ規則(tx+ty)%ACCENT_MOD===0でタイルを選び、
       // (x,y,w,h)(すべてTILE=16の倍数)ぶんの「背景だけ」の合成矩形を作る。
-      function tileAt(tx, ty) { return ((tx + ty) % ACCENT_MOD === 0) ? assetSet.accent.rect : assetSet.ground.rect; }
+      function tileAt(tx, ty) { return ((tx + ty) % ACCENT_MOD === 0) ? magAssetSet.accent.rect : magAssetSet.ground.rect; }
       function buildBackgroundRect(x, y, w, h) {
         const wBytes = w / 8;
         const planes = [Buffer.alloc(wBytes * h), Buffer.alloc(wBytes * h), Buffer.alloc(wBytes * h), Buffer.alloc(wBytes * h)];

@@ -11,13 +11,15 @@ import { resolve } from 'node:path';
 import { decodeMag } from './mag_decode.mjs';
 import { computeMask, mirrorRectHorizontal, verifyMirror, emitCArray } from './kya_convert.mjs';
 
-// MITEI3.MAG(SAKA由来、公開可)の実測結果:
-//   - 8列(キャラのポーズ、KYAと同じ並び: [up*2,down*2,left*4]) x 8段(キャラ8体)
-//     が x=0..255,y=0..255 に配置されている(MITEI2.KYAと同じレイアウト)。
-//   - MITEI2.KYAと違い、x=288以降(タイル領域相当の位置)はモノクロ(白黒2色)
-//     しか使っていないため、タイルは引き続きKYA(MITEI2)側を使う
-//     (samples/walk2.cで両方includeする。詳細はdocs/design.md参照)。
+// 2026-09後半、ORIGINAL/KYARA-03.MAG(ユーザー本人のオリジナル作品と確認済み、
+// 2026-09-21。docs/assets.md参照)へ切り替えた。MITEI2.KYAと同じ配置
+// (8列×12段のキャラ、x=288〜のタイル領域)だが、背景タイルの描き込みが
+// MITEI2系より多く、キャラの色数も多い(実測で確認、docs/design.md
+// 「MAG形式対応」節の追記参照)。CHAR_ROW/TILE_GROUND/TILE_ACCENTは
+// 決め打ちにせず、実際に変換・モザイク化して目視確認した上で選んだ。
 const CHAR_ROW = 0;
+const TILE_GROUND = { a: 0, b: 0 }; // 草(グリーン、スペックル)
+const TILE_ACCENT = { a: 0, b: 2 }; // レンガ(暗い赤、斜め模様)
 
 function pixelAt(decoded, x, y) {
   return decoded.pixels[y * decoded.width + x];
@@ -82,16 +84,23 @@ export async function buildAssetSetFromMag(magPath) {
     return { rect: mirroredRect, mask: mirroredMaskRect.planes[0] };
   });
 
-  return { decoded, palette, up, down, leftFrames, rightFrames };
+  function tileFrame({ a, b }) {
+    const rect = extractRectFromMag(decoded, 288 + b * 16, a * 16, 16, 16);
+    const mask = Buffer.alloc(rect.wBytes * rect.h, 0xFF); // タイルは全面不透明
+    return { rect, mask };
+  }
+  const ground = tileFrame(TILE_GROUND);
+  const accent = tileFrame(TILE_ACCENT);
+
+  return { decoded, palette, up, down, leftFrames, rightFrames, ground, accent };
 }
 
 export function stringifyMagAssets(assetSet, magPathForComment) {
-  const { palette, up, down, leftFrames, rightFrames } = assetSet;
+  const { palette, up, down, leftFrames, rightFrames, ground, accent } = assetSet;
   const lines = [];
   lines.push('/* 自動生成: tools/mag_convert.mjs generate で作成。手編集しないこと。');
-  lines.push(` * 元データ: ${magPathForComment.replace(/^.*[\\/]/, '')} (ユーザー本人のオリジナル作品、C-GAMES/SAKA由来、MAG=MAKIchan MAKI02形式)`);
-  lines.push(' * 生成内容: キャラ(CHAR_ROW段目)の歩行4方向アニメ。タイルはKYA側(samples/kya_assets.h)を流用する');
-  lines.push(' * (MITEI3.MAGのタイル相当領域はモノクロのため。docs/design.md「MAG形式対応」節参照)。');
+  lines.push(` * 元データ: ${magPathForComment.replace(/^.*[\\/]/, '')} (ユーザー本人のオリジナル作品と確認済み。docs/assets.md参照)`);
+  lines.push(' * 生成内容: キャラ(CHAR_ROW段目)の歩行4方向アニメ + 地面タイル2種。');
   lines.push(' */');
   lines.push('#include "p98.h"');
   lines.push('');
@@ -121,6 +130,18 @@ export function stringifyMagAssets(assetSet, magPathForComment) {
   emitGroup('MAG_WALK_LEFT', leftFrames);
   emitGroup('MAG_WALK_RIGHT', rightFrames);
 
+  function emitTile(name, frame) {
+    lines.push(emitCArray(`${name}_B`, frame.rect.planes[0]));
+    lines.push(emitCArray(`${name}_R`, frame.rect.planes[1]));
+    lines.push(emitCArray(`${name}_G`, frame.rect.planes[2]));
+    lines.push(emitCArray(`${name}_I`, frame.rect.planes[3]));
+    lines.push(emitCArray(`${name}_M`, frame.mask));
+    lines.push(`static const p98_sprite_t ${name} = { 16, 16, { ${name}_B, ${name}_R, ${name}_G, ${name}_I }, ${name}_M };`);
+    lines.push('');
+  }
+  emitTile('MAG_TILE_GROUND', ground);
+  emitTile('MAG_TILE_ACCENT', accent);
+
   return lines.join('\n') + '\n';
 }
 
@@ -138,6 +159,8 @@ export function swapRGPlanesMag(assetSet) {
     down: assetSet.down.map(swapFrame),
     leftFrames: assetSet.leftFrames.map(swapFrame),
     rightFrames: assetSet.rightFrames.map(swapFrame),
+    ground: swapFrame(assetSet.ground),
+    accent: swapFrame(assetSet.accent),
   };
 }
 

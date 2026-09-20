@@ -4,7 +4,7 @@
  * 求める(probe_bgpage_bench0_bg.cと同じ考え方)。
  */
 #include "p98.h"
-#include "kya_assets.h"
+#include "mag_assets.h"
 
 #define SCREEN_W 640
 #define SCREEN_H 400
@@ -17,7 +17,7 @@ static void draw_tiled_background(void) {
     int tx, ty;
     for (ty = 0; ty < TILE_ROWS; ty++) {
         for (tx = 0; tx < TILE_COLS; tx++) {
-            const p98_sprite_t *tile = ((tx + ty) % ACCENT_MOD == 0) ? &KYA_TILE_ACCENT : &KYA_TILE_GROUND;
+            const p98_sprite_t *tile = ((tx + ty) % ACCENT_MOD == 0) ? &MAG_TILE_ACCENT : &MAG_TILE_GROUND;
             p98_draw_sprite(tile, tx * TILE, ty * TILE);
         }
     }

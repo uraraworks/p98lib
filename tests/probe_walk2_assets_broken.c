@@ -4,7 +4,6 @@
  * 検査がFAILすることを確認するためのプローブ(tools/verify.mjs参照)。
  */
 #include "p98.h"
-#include "kya_assets.h"
 #include "mag_assets_broken_rg.h"
 
 int main(void) {
@@ -12,8 +11,8 @@ int main(void) {
     p98_flip();
     p98_clear(0);
 
-    p98_draw_sprite(&KYA_TILE_GROUND, 0, 0);
-    p98_draw_sprite(&KYA_TILE_ACCENT, 16, 0);
+    p98_draw_sprite(&MAG_TILE_GROUND, 0, 0);
+    p98_draw_sprite(&MAG_TILE_ACCENT, 16, 0);
 
     p98_draw_sprite(MAG_WALK_DOWN[0], 64, 64);
     p98_draw_sprite(MAG_WALK_LEFT[0], 160, 64);

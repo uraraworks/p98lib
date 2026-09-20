@@ -1,22 +1,21 @@
-/* p98lib デモ2: 実素材(ユーザー本人のオリジナル作品、C-GAMES/SAKA由来)を
- * 使った、タイル背景+4方向歩行アニメのデモ。
+/* p98lib デモ2: 実素材(ユーザー本人のオリジナル作品)を使った、
+ * タイル背景+4方向歩行アニメのデモ。
  *
- * 【2026-09後半、素材をMAG形式(当時の標準フォーマット)へ主役交代】
- * キャラクタは MITEI3.MAG(MAG=MAKIchan MAKI02形式) から tools/mag_convert.mjs
- * で切り出したもの(samples/mag_assets.h、自動生成、手編集しないこと)。
+ * 【2026-09後半、素材をより良い原本(ORIGINAL/KYARA-03.MAG)へ差し替え】
+ * 当初はC-GAMES/SAKA/MITEI2.KYA(キャラは多色だが背景タイルの描き込みが
+ * 少ない)→ MITEI3.MAG(キャラは多色だがタイル領域はモノクロ、キャラも
+ * SAKA/MITEI2.KYAとは別人)の順で試したが、`_local/legacy-a-games/
+ * ORIGINAL/KYARA-03.MAG`(ユーザー本人のオリジナル作品と確認済み、
+ * 2026-09-21。docs/assets.md参照)が、MITEI2.KYAと同じ配置でありながら
+ * 背景タイルの描き込みが多く、キャラの色数も多い「色付き完全版」だと
+ * 分かったため、こちらへ差し替えた。キャラ・タイルとも同じファイル
+ * (KYARA-03.MAG)から切り出している(samples/mag_assets.h、
+ * tools/mag_convert.mjsで自動生成。手編集しないこと)。
+ *
  * KYA(p98lib独自形式)はユーザー本人しか変換できないため、公開して他の人にも
- * 使ってもらう変換ツールとしてはMAGを主役にした。KYA対応は作者向けとして
- * tools/kya_convert.mjsに残してある。
- *
- * タイル(地面)は引き続きKYA側(MITEI2.KYA、samples/kya_assets.h)を使う。
- * 理由: MITEI3.MAGのタイル相当領域(元のMITEI2.KYAでタイルがあった座標)は
- * 実測するとモノクロ(白黒2色)しか使っておらず、タイル素材としては使えな
- * かった(docs/design.md「MAG形式対応」節参照。KYA変換ツールのバグではなく、
- * ユーザー本人の1996年当時の保存データそのものがそうなっていたことを、
- * 実機相当のMAGL.EXEをエミュレータで実行してVRAMの実値を見て確認した)。
- * パレットはMAG側(MAG_PALETTE)を使う。MITEI2.KYAのパレットと1バイトも
- * 違わず一致することを確認済み(tools/compare_kya_mag.mjs)なので、
- * KYA由来のタイルとMAG由来のキャラを同じパレットで問題なく混在できる。
+ * 使ってもらう変換ツールとしてはMAG(当時の標準フォーマット)を主役にした。
+ * KYA対応は作者向けとして tools/kya_convert.mjs に残してある
+ * (このデモでは使わない)。
  *
  *   - キャラ: 32x32、UP/DOWN 各2フレーム、LEFT 4フレーム、RIGHT はLEFTの
  *     水平反転(元データに右向きの絵は無いため、変換ツール側で生成)。
@@ -33,7 +32,6 @@
  * 倍数)に揃えている)。ESCで終了する。
  */
 #include "p98.h"
-#include "kya_assets.h"
 #include "mag_assets.h"
 
 #define SCREEN_W 640
@@ -68,7 +66,7 @@ static void draw_tiled_background(void) {
     int tx, ty;
     for (ty = 0; ty < TILE_ROWS; ty++) {
         for (tx = 0; tx < TILE_COLS; tx++) {
-            const p98_sprite_t *tile = ((tx + ty) % ACCENT_MOD == 0) ? &KYA_TILE_ACCENT : &KYA_TILE_GROUND;
+            const p98_sprite_t *tile = ((tx + ty) % ACCENT_MOD == 0) ? &MAG_TILE_ACCENT : &MAG_TILE_GROUND;
             p98_draw_sprite(tile, tx * TILE, ty * TILE);
         }
     }
