@@ -92,6 +92,25 @@ window.p98probe = {
     const binary = atob(base64);
     return Array.from(binary, (c) => c.charCodeAt(0));
   },
+  sendKey: (code, down) => engine.sendKey(code, down),
+  runNoWait: async (stem) => {
+    const baseline = engine.getScreenText().text;
+    await engine.pasteText(\`B:\\r\`);
+    await waitForCurrentDosPrompt(engine, { baseline, timeout: 15000 });
+    const baseline2 = engine.getScreenText().text;
+    await engine.pasteText(\`\${stem}\\r\`);
+    return baseline2;
+  },
+  waitPrompt: async (baseline, timeoutMs) => {
+    const screen = await waitForCurrentDosPrompt(engine, { baseline, timeout: timeoutMs ?? 20000 });
+    return screen.text;
+  },
+  runDosCommand: async (cmd) => {
+    const baseline = engine.getScreenText().text;
+    await engine.pasteText(\`\${cmd}\\r\`);
+    const screen = await waitForCurrentDosPrompt(engine, { baseline, timeout: 15000 });
+    return screen.text;
+  },
 };
 </script></body></html>`;
 
@@ -155,19 +174,23 @@ async function withPage(browser, url, fn) {
 async function main() {
   const results = [];
   console.log('--- ビルド ---');
-  const [fillExe, flipExe, stateExe, fillBrokenExe] = await Promise.all([
+  const [fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
     buildOrThrow('tests/probe_state.c'),
     buildOrThrow('tests/probe_fill.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_noclip.c') }),
+    buildOrThrow('tests/probe_key.c'),
+    buildOrThrow('tests/probe_key.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_norelease.c') }),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し)');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=離す処理無し)');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
     flip: programFdFor(flipExe, 'PROBE_FL'),
     state: programFdFor(stateExe, 'PROBE_ST'),
     fillbroken: programFdFor(fillBrokenExe, 'PROBE_FI'),
+    key: programFdFor(keyExe, 'PROBE_KE'),
+    keybroken: programFdFor(keyBrokenExe, 'PROBE_KE'),
   };
 
   const server = await startServer(programFds);
@@ -258,6 +281,87 @@ async function main() {
       console.log(`${vectorChanged ? 'OK  ' : 'FAIL'} INT23h V0(元)=${vMatch?.[1]} V1(init中)=${vMatch?.[2]} (異なるはず)`);
       results.push({ label: 'ゲスト自身が読んでもINT23hはp98_quit後に元へ戻る', ok: vectorRestored, actual: vMatch?.[3], expected: vMatch?.[1] });
       console.log(`${vectorRestored ? 'OK  ' : 'FAIL'} INT23h V2(quit後)=${vMatch?.[3]} (V0と一致するはず)`);
+    });
+    console.log('\n--- キーボード (probe_key: down/pressed/release/複数同時/getch) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/key.xdf`), PORT);
+      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PROBE_KE'));
+      await sleep(800); // 起動直後の割り込みフック完了を待つ
+
+      // フェーズ1: 単発タップ
+      await sk(0x1D, true); await sleep(350); await sk(0x1D, false);
+      await sleep(300);
+      // フェーズ2: a+bを同時に押す(複数キー同時押し)
+      await sk(0x1D, true); await sk(0x2D, true);
+      await sleep(350);
+      await sk(0x1D, false); await sk(0x2D, false);
+      await sleep(300);
+      // フェーズ3: SHIFT+a -> a単独 -> CTRL+a (500ms未満に抑えてキーリピートを避ける)
+      await sk(0x70, true); await sk(0x1D, true); await sleep(80); await sk(0x1D, false); await sk(0x70, false);
+      await sleep(200);
+      await sk(0x1D, true); await sleep(80); await sk(0x1D, false);
+      await sleep(200);
+      await sk(0x74, true); await sk(0x1D, true); await sleep(80); await sk(0x1D, false); await sk(0x74, false);
+      await sleep(200);
+      // フェーズ4: SHIFT+1 -> '!'
+      await sk(0x70, true); await sk(0x01, true); await sleep(80); await sk(0x01, false); await sk(0x70, false);
+
+      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
+      if (errors.length) console.log('page errors:', errors);
+      // 80桁で折り返されるため、DOWNA_SEEN=から始まる行だけでなく次行にも
+      // 値が続くことがある(GETCH=の長い値が典型)。折り返しをまたいで
+      // マッチできるよう、行分割ではなく生の text 全体に対して正規表現をかける
+      // (probe_state のBEF/AFT/V0..V2判定と同じやり方)。
+      const startIdx = text.indexOf('DOWNA_SEEN=');
+      const chunk = (startIdx >= 0 ? text.slice(startIdx, startIdx + 200) : '').replace(/\n/g, '');
+      console.log('screen text:', JSON.stringify(chunk));
+
+      const g = (re) => chunk.match(re)?.[1];
+      results.push({ label: '押している間 p98_key_down が真(DOWNA_SEEN)', ok: g(/DOWNA_SEEN=(\d)/) === '1', actual: g(/DOWNA_SEEN=(\d)/), expected: '1' });
+      results.push({ label: '離すと p98_key_down が偽に戻る(DOWNA_END、これが今回の肝)', ok: g(/DOWNA_END=(\d)/) === '0', actual: g(/DOWNA_END=(\d)/), expected: '0' });
+      results.push({ label: '複数キー同時押し(BOTH_SEEN)', ok: g(/BOTH_SEEN=(\d)/) === '1', actual: g(/BOTH_SEEN=(\d)/), expected: '1' });
+      results.push({ label: 'p98_key_pressedはタップ1回につき1回だけ立つ(PRESSA=5回タップ分)', ok: g(/PRESSA=([0-9A-F]{2})/) === '05', actual: g(/PRESSA=([0-9A-F]{2})/), expected: '05' });
+      results.push({ label: 'p98_key_pressedはタップ1回につき1回だけ立つ(PRESSB=1回タップ分)', ok: g(/PRESSB=([0-9A-F]{2})/) === '01', actual: g(/PRESSB=([0-9A-F]{2})/), expected: '01' });
+      // 注意: 'B'は16進数字としても合法(0-9A-F)なため、改行除去後に続く
+      // "B:\>"プロンプトの'B'まで拾ってしまわないよう、7個ぶんの2桁hexに
+      // 個数を固定してマッチさせる。
+      const getch = g(/GETCH=([0-9A-F]{2}(?:,[0-9A-F]{2}){6})/);
+      results.push({
+        label: 'p98_key_getchで打った文字列が順番どおり取れる(a,a,b,SHIFT+a=A,a,CTRL+a,SHIFT+1=!)',
+        ok: getch === '61,61,62,41,61,01,21', actual: getch, expected: '61,61,62,41,61,01,21',
+      });
+      for (const r of results.slice(-6)) console.log(`${r.ok ? 'OK  ' : 'FAIL'} ${r.label}${r.ok ? '' : ` actual=${JSON.stringify(r.actual)} expected=${JSON.stringify(r.expected)}`}`);
+    });
+
+    console.log('\n--- 故障注入: probe_key(離す処理無し版)は②でFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/keybroken.xdf`), PORT);
+      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PROBE_KE'));
+      await sleep(800);
+      await sk(0x1D, true); await sleep(350); await sk(0x1D, false);
+      // 残りのフェーズは省略(タイムラインだけ揃えれば十分、DOWNA_ENDだけ見る)
+      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 25000), baseline2);
+      if (errors.length) console.log('page errors:', errors);
+      const startIdx = text.indexOf('DOWNA_SEEN=');
+      const chunk = (startIdx >= 0 ? text.slice(startIdx, startIdx + 200) : '').replace(/\n/g, '');
+      const g = (re) => chunk.match(re)?.[1];
+      const brokenDetected = g(/DOWNA_END=(\d)/) === '1'; // 正常なら0のはずが、故障注入では1のまま
+      results.push({ label: '故障注入(離す処理無し)はDOWNA_ENDが1のまま(離れない)になる', ok: brokenDetected, actual: g(/DOWNA_END=(\d)/), expected: '1(壊れているはず)' });
+      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(離す処理無し)はDOWNA_ENDが1のまま actual=${g(/DOWNA_END=(\d)/)}`);
+    });
+
+    console.log('\n--- p98_quit後もDOSが生きている(コマンドを1つ実行してプロンプトが返る) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/key.xdf`, 'PROBE_KE', { waitForExit: true }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      const text = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
+      const alive = /FreeDOS|Kernel|Version/i.test(text);
+      results.push({ label: 'p98_quit後、DOSコマンド(VER)を実行してプロンプトが返る(ハングしていない)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
+      console.log(`${alive ? 'OK  ' : 'FAIL'} p98_quit後にVERを実行してプロンプトが返る`);
     });
   } finally {
     await browser.close();

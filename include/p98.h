@@ -5,9 +5,9 @@
  * 仕様の根拠: WebNP2-wiki (Graphics.md / Timing-and-Interrupts.md 等) と
  * 実機ではなくエミュレータ上での実測。詳細は docs/design.md を参照。
  *
- * 今回のスコープ: 画面初期化・VSYNC待ち・ページ交換・GRCGによる塗り・パレット設定のみ。
- * キーボードとスプライトは docs/design.md に API の形だけを設計として書いてある
- * (未実装)。
+ * スコープ: 画面初期化・VSYNC待ち・ページ交換・GRCGによる塗り・パレット設定・
+ * キーボード。スプライトは docs/design.md に API の形だけを設計として
+ * 書いてある(未実装)。
  */
 #ifndef P98_H
 #define P98_H
@@ -46,5 +46,34 @@ void p98_fill_rect(int x, int y, int w, int h, int color);
 
 /* パレット番号 index (0-15) の色を r,g,b (各0-15) に設定する。 */
 void p98_set_palette(int index, int r, int g, int b);
+
+/* ---- キーボード (p98_init()～p98_quit()の間だけ有効) ----
+ * 実装はキーボード割り込み(IRQ1 = INT 09h、実測で確認。docs/design.md参照)を
+ * 自前の割り込みハンドラで奪う方式。scancode は 0-127
+ * (WebNP2-wiki Keyboard.md のスキャンコード表と同じ体系、bit7は使わない)。
+ * かな/漢字変換、GRPH配列の文字は対象外。
+ */
+
+/* このフレーム分の入力を取り込む(スナップショット方式)。
+ * p98_key_down()/p98_key_pressed() はこの呼び出し時点の状態を返す。
+ * 毎フレーム1回、ループの先頭で呼ぶ想定。
+ */
+void p98_poll(void);
+
+/* scancode を押している間ずっと真(1)。範囲外(0-127以外)は常に0。 */
+int p98_key_down(int scancode);
+
+/* 直前の p98_poll() から今回の p98_poll() までの間に、scancode の
+ * 押下(立ち上がり)が最低1回あれば真(1)。短い押下でも取りこぼさないよう、
+ * 割り込みハンドラ側で「押した」フラグを立て、p98_poll()で読み出してから
+ * クリアする(次にp98_pollを呼ぶまで消えない)。
+ */
+int p98_key_pressed(int scancode);
+
+/* 文字入力のリングバッファから1文字取り出す。無ければ0を返す(非ブロッキング)。
+ * SHIFT(押している間)とCAPS(トグル)を反映する。CTRL+文字キーは制御コード
+ * (例: CTRL+aは0x01)を返す。かな・GRPHは文字を生成しない(対象外)。
+ */
+int p98_key_getch(void);
 
 #endif /* P98_H */

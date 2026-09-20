@@ -1,4 +1,10 @@
 /*
+ * ★故障注入版(tests/p98_broken_norelease.c)★
+ * src/p98.c のコピーに対し、キーボード割り込みハンドラの「離した」処理
+ * (releasedのときにp98__key_raw_downのbitを降ろす)だけを取り除いてある。
+ * docs/verify-log.md の陰性対照(②離すとp98_key_downが偽に戻る、をFAILさせられるか)専用。
+ * 通常のビルド・配布物には含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -291,9 +297,9 @@ static void __interrupt p98__key_isr(void) {
     unsigned char idx = (unsigned char)(code >> 3);
     unsigned char bit = (unsigned char)(1 << (code & 7));
 
-    if (released) {
-        p98__key_raw_down[idx] &= (unsigned char)~bit;
-    } else {
+    /* ★故障注入: releasedのときにbitを降ろす処理を削除している(docs参照)。
+     * これにより離しても p98_key_down() が真のままになるはず。 */
+    if (!released) {
         p98__key_raw_down[idx] |= bit;
         p98__key_edge_down[idx] |= bit;
     }
