@@ -15,6 +15,11 @@
  *    SmallerC自身がコンパイル結果に出す "; loc x : (@N)" コメントを実際に
  *    出力させて確認した値(huge modelでは各引数が型によらず4バイトスロットを
  *    占める)。tools/build.mjs のビルド検証、および docs/design.md 参照。
+ *  - unityビルド廃止(2026-09、docs/design.md参照)に伴い、p98__outb()だけは
+ *    本物の別ファイル(src/p98_asm.asm)のNASMへ切り出し、tools/build.mjsが
+ *    ライブラリのCオブジェクト・ユーザーのCオブジェクトとは別にアセンブルして
+ *    リンク段で合流させる。残りのプリミティブは引き続きasm()ブロックのまま
+ *    (全部を移す必要はなく、経路が動くことを示すのがスコープ)。
  */
 #include "p98.h"
 
@@ -51,12 +56,10 @@
  * 低レベル asm プリミティブ
  * ===================================================================== */
 
-/* out port, val (1バイト) */
-static void p98__outb(unsigned port, unsigned char val) {
-    asm("mov dx, [bp+8]");
-    asm("mov al, [bp+12]");
-    asm("out dx, al");
-}
+/* out port, val (1バイト)。実装は src/p98_asm.asm (別ファイルのNASM) にあり、
+ * tools/build.mjs がライブラリのCオブジェクトとは別にアセンブル・リンクする
+ * (unityビルド廃止。詳細はdocs/design.md)。 */
+extern void p98__outb(unsigned port, unsigned char val);
 
 /* in port (1バイト、ゼロ拡張して返す) */
 static unsigned char p98__inb(unsigned port) {

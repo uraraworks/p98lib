@@ -11,29 +11,55 @@
 
 ## ビルド経路
 
-### なぜ「NASMの別ファイル」ではなく asm() ブロックにしたか
+### ビルド経路の変遷: asm()ブロック→別ファイルのNASM+複数オブジェクトリンク
 
-依頼時の想定は「C(SmallerC huge)とライブラリ本体(NASM)をリンクする」だったが、
-実際に調べた結果、WorkbenchNP2 の `toolchain/compile-core.mjs` は
+**2026-09の最初の依頼時点**の想定は「C(SmallerC huge)とライブラリ本体(NASM)を
+リンクする」だったが、その時点で調べた結果、WorkbenchNP2 の
+`toolchain/compile-core.mjs` は
 
 - Cソース **1本** を smlrpp → smlrc → nasm → smlrl の順で処理し、
 - smlrl のリンクも **1つの.oとlcdh.aのリンクだけ**をサポートしていて、
 - 複数の.oをまとめてリンクする経路は提供されていない
 
-ことが分かった。ここでNASMの別ファイルをリンクできるようにWorkbenchNP2側へ
-手を入れることもできたが、依頼の前提(「WorkbenchNP2側のファイルは変更しない」)
-に反する。
+ことが分かった。当時は依頼の前提が「WorkbenchNP2側のファイルは変更しない」
+だったため、SmallerC (huge model) の `asm("assembly code");`
+(文字列をそのまま出力に埋め込むだけのインラインアセンブリ。
+`toolchain/smallerc-src/v0100/doc/smlrc.md` に記載があり、コンパイラの
+コード生成へそのまま流れる本物のNASM構文)を使い、`src/p98.c` 1本
+(+ `include/p98.h`)で完結させ、WorkbenchNP2 側を一切変更しない形にしていた。
+ただしこの方式は「別ファイルにしてリンクする」のではなく「Cの関数の中に
+埋め込む」形であり、ユーザーのCとライブラリのCを毎回**1つのCソースへ
+文字列連結してコンパイルするunityビルド**(後述)とセットだった。
 
-一方、SmallerC (huge model) は `asm("assembly code");` という **文字列をそのまま
-出力に埋め込むだけ**のインラインアセンブリをサポートしている
-(`toolchain/smallerc-src/v0100/doc/smlrc.md` に記載があり、対応するコンパイラの
-コード生成(NASM構文の中間asm)へそのまま流れる。つまり asm() の中身は最終的に
-**同じ nasm(wasm) を通る本物のNASM構文**であり、「速度が要る部分はNASMで書く」
-という要件は満たしている。単に「別ファイルにしてリンクする」のではなく
-「Cの関数の中に埋め込む」形にした、という違いだけ。
+**2026-09の今回の依頼で前提が変わり**、WorkbenchNP2 側を変更してよいことに
+なったため、unityビルドと asm() 埋め込み方式をやめ、次の形へ移行した:
 
-この方式なら p98lib は `src/p98.c` 1本(+ `include/p98.h`)で完結し、
-WorkbenchNP2 は一切変更せずに済む。
+- WorkbenchNP2 の `compile-core.mjs` に
+  `opts.extraLinkInputs`(追加の`.o`/`.a`をリンク段で束ねる)と
+  `compileToObjectWithFactories`(Cソース1本をリンクせずELFオブジェクトへ)を
+  追加してもらった(WorkbenchNP2 `docs/smallerc-wasm.md` 参照)。
+- `p98__outb`(out port,val)は本物の別ファイル `src/p98_asm.asm`(NASM)へ
+  切り出し、`toolchain/assemble.mjs` でELFオブジェクト化した。
+- `tools/build.mjs` は「`src/p98.c`(ライブラリ)を単独でオブジェクト化」
+  「`src/p98_asm.asm`を単独でアセンブル」「ユーザーの`.c`をコンパイルする際に
+  その2つを`extraLinkInputs`として渡してリンク」という3段構成にした。
+  C同士(ライブラリ/ユーザー)を文字列連結する処理はもう無い。
+- 残りのプリミティブ(`p98__inb`/`p98__fillmem`/`p98__peekb`/`p98__pokeb`/
+  割り込みベクタ操作)は引き続き `asm()` ブロックのままにした。全部を
+  別ファイルへ移す必要は無く、「別ファイルのNASM→ELFオブジェクト→リンク」
+  という経路が本当に動くことを示すのが今回のスコープだったため。
+
+この移行にあたって、huge modelでの関数呼び出しの実際のABIを
+WorkbenchNP2 `toolchain/smallerc-src/v0100/cgx86.c` のコード生成を実際に
+コンパイルして確認した(詳細は次節の実測結果と同じ手法)。呼び出し側
+(smlrcが生成するC側のコード)は `db 0x9A`(far call)+ `section .relot` 経由の
+遠隔呼び出しを自動生成するため、**呼ばれる側の手書きNASMは特別なことをする
+必要が無く**、プロローグ/エピローグ(`push ebp` / `movzx ebp, sp` …
+`o32 leave` / `retf`)をsmlrc生成コードに合わせるだけでよいと分かった。
+この理解が正しいことは、WorkbenchNP2側の実行検証
+(`toolchain/verify-link-multi-object.mjs`)とp98lib側の`tools/verify.mjs`
+(18項目全通過、移行前と同じ期待値のVRAMバイト列と一致)の両方で
+実機(WebNP2+FreeDOS(98))実行を通して確認済み。
 
 ### asm() ブロックの安全な書き方(重要な実測結果)
 
@@ -101,12 +127,15 @@ Ctrl+C (INT 23h) を無害化するハンドラは、SmallerCの `void __interru
 欠点: WorkbenchNP2 チェックアウトが `p98lib` の隣(`../WorkbenchNP2`)に無いと
 ビルドできない。開発機ではこの前提を満たしている。
 
-### unityビルド(1翻訳単位)
+### unityビルド(1翻訳単位)は廃止済み(2026-09)
 
-`compile-core.mjs` はCソース1本しか受け付けないため、`tools/build.mjs` は
-`src/p98.c` の本文とユーザーの `.c` を**文字列として連結**してから1回で
-コンパイルする(`p98.h`はincludeFilesとして渡し、`#include "p98.h"`で解決)。
-複数.cファイルを別々にコンパイルしてリンクする経路は無い。
+以前は `compile-core.mjs` がCソース1本しか受け付けなかったため、
+`tools/build.mjs` は `src/p98.c` の本文とユーザーの `.c` を**文字列として
+連結**してから1回でコンパイルしていた。現在は前節の通り、WorkbenchNP2側に
+`compileToObjectWithFactories` と `opts.extraLinkInputs` が追加されたため、
+ライブラリのCとユーザーのCを**別々にコンパイルしてリンク**する形になり、
+この文字列連結は行っていない。`p98.h` は変わらず両方の翻訳単位へ
+includeFilesとして渡し、`#include "p98.h"` で解決する。
 
 ## ハードウェア仕様(実測で確認したこと)
 

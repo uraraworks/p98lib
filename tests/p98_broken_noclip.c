@@ -57,11 +57,10 @@
  * ===================================================================== */
 
 /* out port, val (1バイト) */
-static void p98__outb(unsigned port, unsigned char val) {
-    asm("mov dx, [bp+8]");
-    asm("mov al, [bp+12]");
-    asm("out dx, al");
-}
+/* out port, val (1バイト)。src/p98.c と同じく src/p98_asm.asm (別ファイルのNASM)
+ * を使う。tools/build.mjs はライブラリ差し替え(libPath)時もこのasmオブジェクトを
+ * 常に一緒にリンクする。 */
+extern void p98__outb(unsigned port, unsigned char val);
 
 /* in port (1バイト、ゼロ拡張して返す) */
 static unsigned char p98__inb(unsigned port) {

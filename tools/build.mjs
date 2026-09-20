@@ -13,6 +13,15 @@
 //   - WorkbenchNP2側を書き換えないので、依存が壊れたときの原因切り分けがしやすい
 // 欠点として、WorkbenchNP2チェックアウトがp98libの隣(../WorkbenchNP2)に無いと
 // ビルドできない。開発機はこの前提を満たしている。
+//
+// ビルド方式(2026-09、unityビルド廃止。経緯はdocs/design.md参照):
+// WorkbenchNP2 の compile-core.mjs に追加された
+//   - compileToObjectWithFactories: Cソース1本をリンクせずELFオブジェクトへ
+//   - compileWithFactories の opts.extraLinkInputs: 追加の.o/.aをリンク段で束ねる
+// を使い、「p98.c(ライブラリ)を先にオブジェクト化 → ユーザーのCをコンパイルする
+// 際にそのオブジェクトと手書きNASM(p98_asm.asm)をextraLinkInputsとしてリンクする」
+// という、CとNASMが別ファイルのまま完結する経路にした。文字列連結によるunity
+// ビルドはもう行わない。
 
 import { createRequire } from 'node:module';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -27,43 +36,72 @@ const WORKBENCH_TOOLCHAIN = join(WORKBENCH_ROOT, 'toolchain');
 const require = createRequire(import.meta.url);
 
 async function loadWorkbenchTools() {
-  const { compileWithFactories } = await import(join(WORKBENCH_TOOLCHAIN, 'compile-core.mjs'));
+  const { compileWithFactories, compileToObjectWithFactories } = await import(join(WORKBENCH_TOOLCHAIN, 'compile-core.mjs'));
   const { assemble } = await import(join(WORKBENCH_TOOLCHAIN, 'assemble.mjs'));
   const { loadDefaultHeaders } = await import(join(WORKBENCH_TOOLCHAIN, 'compile.mjs'));
   const { makeFd } = await import(join(WORKBENCH_TOOLCHAIN, 'makefd.mjs'));
   const createSmlrpp = require(join(WORKBENCH_TOOLCHAIN, 'smlrc-wasm', 'smlrpp.js'));
   const createSmlrc = require(join(WORKBENCH_TOOLCHAIN, 'smlrc-wasm', 'smlrc.js'));
   const createSmlrl = require(join(WORKBENCH_TOOLCHAIN, 'smlrc-wasm', 'smlrl.js'));
-  return { compileWithFactories, assemble, loadDefaultHeaders, makeFd, createSmlrpp, createSmlrc, createSmlrl };
+  return {
+    compileWithFactories, compileToObjectWithFactories, assemble, loadDefaultHeaders, makeFd,
+    createSmlrpp, createSmlrc, createSmlrl,
+  };
+}
+
+function stageErrors(stage, errors) {
+  return errors.map((error) => ({ ...error, stage: error.stage ?? stage }));
 }
 
 /**
- * p98.c (ライブラリ本体)とユーザーのCソースを1つの翻訳単位として結合してビルドする
- * (unity build)。WorkbenchNP2 の compile-core.mjs は1回のコンパイルにつき
- * C ソース1本だけを受け取り、複数.oのリンクは提供していないため。
+ * p98.c (ライブラリ本体、または libPath で差し替えた故障注入版)をオブジェクトへ、
+ * src/p98_asm.asm を別途ELFオブジェクトへ変換し、ユーザーの.cをコンパイルする際に
+ * その2つをextraLinkInputsとしてリンクする。p98libは huge model 固定
+ * (ユーザー決定済み)。small で組もうとした場合は例外で止める。
  *
  * @param {string} userSourcePath ユーザーの main() を含む .c ファイル
- * @param {{libPath?: string}} [opts] libPath: 差し替えたいp98.c(故障注入版など)。省略時は src/p98.c
+ * @param {{libPath?: string, model?: string}} [opts] libPath: 差し替えたいp98.c(故障注入版など)。省略時は src/p98.c
  * @returns {Promise<{ok:true, output:Uint8Array, assembly:Uint8Array, linkerMap:string} | {ok:false, errors:any[]}>}
  */
 export async function buildProgram(userSourcePath, opts = {}) {
+  if (opts.model !== undefined && opts.model !== 'huge') {
+    throw new Error(`p98libはhuge model固定です。opts.model='${opts.model}'は許可されていません`);
+  }
   const tools = await loadWorkbenchTools();
   const libPath = opts.libPath ?? join(REPO_ROOT, 'src', 'p98.c');
-  const [libSource, userSource, library, includeFiles] = await Promise.all([
-    readFile(libPath, 'utf8'),
-    readFile(userSourcePath, 'utf8'),
+  const asmPath = join(REPO_ROOT, 'src', 'p98_asm.asm');
+
+  const [libSource, userSource, asmSource, library, includeFiles] = await Promise.all([
+    readFile(libPath),
+    readFile(userSourcePath),
+    readFile(asmPath),
     readFile(join(WORKBENCH_TOOLCHAIN, 'smlrc-wasm', 'lcdh.a')),
     tools.loadDefaultHeaders(),
   ]);
   const p98Header = await readFile(join(REPO_ROOT, 'include', 'p98.h'));
   includeFiles['p98.h'] = new Uint8Array(p98Header);
 
-  // p98.c 自身も #include "p98.h" するので、includeFilesにヘッダを積んだうえで
-  // 「p98.c本文 + ユーザーソース」を1本のCソースとして渡す。
-  const combined = `${libSource}\n/* ---- ここから ${userSourcePath} ---- */\n${userSource}\n`;
+  // 1. ライブラリ(p98.c、または故障注入版)を単独でオブジェクト化する。
+  const libObject = await tools.compileToObjectWithFactories(new Uint8Array(libSource), {
+    includeFiles, model: 'huge',
+  }, { createSmlrpp: tools.createSmlrpp, createSmlrc: tools.createSmlrc, assemble: tools.assemble });
+  if (!libObject.ok) {
+    return { ok: false, errors: stageErrors('p98lib', libObject.errors) };
+  }
 
-  const result = await tools.compileWithFactories(new TextEncoder().encode(combined), {
+  // 2. p98_asm.asm を別途ELFオブジェクトへアセンブルする(NASMでの手書き実装)。
+  const asmObject = await tools.assemble(new Uint8Array(asmSource), { format: 'elf', listing: true });
+  if (!asmObject.ok) {
+    return { ok: false, errors: stageErrors('nasm', asmObject.errors) };
+  }
+
+  // 3. ユーザーのCをコンパイルし、1.と2.のオブジェクトをリンク段で束ねる。
+  const result = await tools.compileWithFactories(new Uint8Array(userSource), {
     library: new Uint8Array(library), includeFiles, model: 'huge',
+    extraLinkInputs: [
+      { name: 'p98lib.o', bytes: libObject.object },
+      { name: 'p98asm.o', bytes: asmObject.output },
+    ],
   }, {
     createSmlrpp: tools.createSmlrpp, createSmlrc: tools.createSmlrc,
     createSmlrl: tools.createSmlrl, assemble: tools.assemble,
