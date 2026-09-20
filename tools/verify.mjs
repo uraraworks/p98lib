@@ -87,6 +87,24 @@ window.p98probe = {
     await window.p98probe.boot(programUrl);
     return window.p98probe.run(stem, opts);
   },
+  // スプライト速度計測専用: "stemを打ってからプロンプトへ戻るまで" だけを
+  // ホスト側のDate.now()で計る(tools/verify.mjsのコメント・docs/design.md参照。
+  // ゲスト側のBIOSティックは実時間と安定して対応しないことが実測で分かったため)。
+  runTimed: async (stem, timeoutMs) => {
+    const baseline = engine.getScreenText().text;
+    await engine.pasteText(\`B:\\r\`);
+    await waitForCurrentDosPrompt(engine, { baseline, timeout: 15000 });
+    const baseline2 = engine.getScreenText().text;
+    const t0 = performance.now();
+    await engine.pasteText(\`\${stem}\\r\`);
+    await waitForCurrentDosPrompt(engine, { baseline: baseline2, timeout: timeoutMs ?? 30000 });
+    const t1 = performance.now();
+    return t1 - t0;
+  },
+  runProgramTimed: async (programUrl, stem, timeoutMs) => {
+    await window.p98probe.boot(programUrl);
+    return window.p98probe.runTimed(stem, timeoutMs);
+  },
   readMemory: (addr, len) => {
     const { base64 } = engine.readMemoryBase64(addr, len);
     const binary = atob(base64);
@@ -154,7 +172,6 @@ function assertEqual(label, actual, expected, results) {
 
 const PLANE = { B: 0xA8000, R: 0xB0000, G: 0xB8000, I: 0xE0000 };
 const ROW = 80;
-const PAGE_STRIDE = 0x8000; // 仮説: 裏ページはプレーン先頭から+0x8000バイト
 
 async function withPage(browser, url, fn) {
   const page = await browser.newPage();
@@ -174,15 +191,23 @@ async function withPage(browser, url, fn) {
 async function main() {
   const results = [];
   console.log('--- ビルド ---');
-  const [fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe] = await Promise.all([
+  const [
+    fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe,
+    spriteExe, spriteNoMaskExe, spriteNoClipExe, spriteBenchExe, spriteBench0Exe,
+  ] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
     buildOrThrow('tests/probe_state.c'),
     buildOrThrow('tests/probe_fill.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_noclip.c') }),
     buildOrThrow('tests/probe_key.c'),
     buildOrThrow('tests/probe_key.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_nodiff.c') }),
+    buildOrThrow('tests/probe_sprite.c'),
+    buildOrThrow('tests/probe_sprite.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_spritenomask.c') }),
+    buildOrThrow('tests/probe_sprite.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_spritenoclip.c') }),
+    buildOrThrow('tests/probe_sprite_bench.c'),
+    buildOrThrow('tests/probe_sprite_bench0.c'),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し)');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -191,6 +216,11 @@ async function main() {
     fillbroken: programFdFor(fillBrokenExe, 'PROBE_FI'),
     key: programFdFor(keyExe, 'PROBE_KE'),
     keybroken: programFdFor(keyBrokenExe, 'PROBE_KE'),
+    sprite: programFdFor(spriteExe, 'PROBE_SP'),
+    spritenomask: programFdFor(spriteNoMaskExe, 'PROBE_SP'),
+    spritenoclip: programFdFor(spriteNoClipExe, 'PROBE_SP'),
+    spritebench: programFdFor(spriteBenchExe, 'PROBE_SB'),
+    spritebench0: programFdFor(spriteBench0Exe, 'PROBE_S0'),
   };
 
   const server = await startServer(programFds);
@@ -369,6 +399,145 @@ async function main() {
       results.push({ label: '故障注入(差分無し)はPRESSLONGが1にならない(長押し中ずっと真になってしまう)', ok: brokenDetected, actual: pressLong, expected: '01ではないはず' });
       console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(差分無し) PRESSLONG actual=${pressLong}`);
     });
+
+    console.log('\n--- スプライト (probe_sprite: シフト/色+マスク/重ね描き/クリップ) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/sprite.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      const read = (addr, len) => page.evaluate((a, l) => window.p98probe.readMemory(a, l), addr, len);
+
+      // 1) 横1ドットシフト(shift=0..7)。x=104+i, y=10+i。destバイトは13(と、shift!=0なら14)。
+      //   期待値は 0xFF>>shift / (0xFF<<(8-shift))&0xFF の手計算。
+      const shiftExpect = [
+        [0xFF, null], [0x7F, 0x80], [0x3F, 0xC0], [0x1F, 0xE0],
+        [0x0F, 0xF0], [0x07, 0xF8], [0x03, 0xFC], [0x01, 0xFE],
+      ];
+      for (let s = 0; s < 8; s++) {
+        const rowOff = (10 + s) * ROW;
+        const mem = await read(PLANE.B + rowOff + 13, 2);
+        const [b13, b14] = shiftExpect[s];
+        assertEqual(`シフトshift=${s}: byte13`, [mem[0]], [b13], results);
+        if (b14 === null) {
+          assertEqual(`シフトshift=${s}: byte14は未書き込み(destByteCount=1)`, [mem[1]], [0x00], results);
+        } else {
+          assertEqual(`シフトshift=${s}: byte14`, [mem[1]], [b14], results);
+        }
+      }
+      // shift=3のケースだけ4プレーンとも同じ値になっていることも確認(全プレーン配線の確認)。
+      for (const plane of ['B', 'R', 'G', 'I']) {
+        const mem = await read(PLANE[plane] + (10 + 3) * ROW + 13, 2);
+        assertEqual(`シフトshift=3 ${plane}plane byte13,14`, mem, [0x1F, 0xE0], results);
+      }
+
+      // 2) 複数色+マスク(x=200,y=50)。row0(y=50)はB/R=0xFB,0xC0、G/I=0,0。
+      const row0Off = 50 * ROW;
+      assertEqual('スプライトrow0 Bplane byte25,26', await read(PLANE.B + row0Off + 25, 2), [0xFB, 0xC0], results);
+      assertEqual('スプライトrow0 Rplane byte25,26', await read(PLANE.R + row0Off + 25, 2), [0xFB, 0xC0], results);
+      assertEqual('スプライトrow0 Gplane byte25,26(色に緑成分は無い)', await read(PLANE.G + row0Off + 25, 2), [0x00, 0x00], results);
+      // row1(y=51)は色12(緑+輝度)で全10ドット不透明: G/I=0xFF,0xC0、B/R=0,0。
+      const row1Off = 51 * ROW;
+      assertEqual('スプライトrow1 Gplane byte25,26', await read(PLANE.G + row1Off + 25, 2), [0xFF, 0xC0], results);
+      assertEqual('スプライトrow1 Bplane byte25,26(色に青成分は無い)', await read(PLANE.B + row1Off + 25, 2), [0x00, 0x00], results);
+
+      // 3) 重ね描き: fill_rect(色5=青+緑)の上にrow0(マスクの穴=col5)を描く。
+      //    手計算(docs/verify-log.md): 穴(byte25のbit2)では矩形の色が残るはず。
+      //    B[25]=0xFF(矩形のB=1がそのまま残る。マスク無視ならFB相当ではなくFFのまま
+      //    ではなく0xFBになるはず、というのが故障注入との違い)。
+      //    G[25]=0x04(矩形のG=1が穴だけ残り、他はスプライトのG=0で上書きされ0になる)。
+      const row0OverlapOff = 60 * ROW;
+      assertEqual('重ね描き: Bplane byte25(穴でB=1が残る)', await read(PLANE.B + row0OverlapOff + 25, 1), [0xFF], results);
+      assertEqual('重ね描き: Gplane byte25(穴でG=1が残り、他は0で上書き)', await read(PLANE.G + row0OverlapOff + 25, 1), [0x04], results);
+      assertEqual('重ね描き: Bplane byte26(穴が無い列は矩形と同じ0xC0)', await read(PLANE.B + row0OverlapOff + 26, 1), [0xC0], results);
+
+      // 4) 画面端・四隅のクリップ(8x4白ベタ、B/R/G/I全プレーン同一パターン)
+      // 左端 x=-3,y=200: 可視5px -> 0xF8。次のバイト(cols8-15)は触っていないはず。
+      let r = await read(PLANE.B + 200 * ROW + 0, 2);
+      assertEqual('左端クリップ: byte0=0xF8、byte1は未書き込み', r, [0xF8, 0x00], results);
+      // 右端 x=635,y=210: byte79=0x1F。次の行(211)のbyte0は触っていないはず(横クリップの検査を兼ねる)。
+      r = await read(PLANE.B + 210 * ROW + 79, 1);
+      assertEqual('右端クリップ: byte79=0x1F', r, [0x1F], results);
+      r = await read(PLANE.B + 211 * ROW + 0, 1);
+      assertEqual('右端クリップ: 次行(211)の先頭バイトは触られていない', r, [0x00], results);
+      // 上端 x=300,y=-2: 4行中、上2行はクリップされ可視2行(y=0,1)のみ。x=300はshift=4。
+      r = await read(PLANE.B + 0 * ROW + 37, 2);
+      assertEqual('上端クリップ: row0 byte37,38=0x0F,0xF0', r, [0x0F, 0xF0], results);
+      r = await read(PLANE.B + 1 * ROW + 37, 2);
+      assertEqual('上端クリップ: row1 byte37,38=0x0F,0xF0', r, [0x0F, 0xF0], results);
+      // 下端 x=310,y=398: 可視2行(398,399)のみ。x=310はshift=6。
+      r = await read(PLANE.B + 398 * ROW + 38, 2);
+      assertEqual('下端クリップ: row398 byte38,39=0x03,0xFC', r, [0x03, 0xFC], results);
+      r = await read(PLANE.B + 399 * ROW + 38, 2);
+      assertEqual('下端クリップ: row399 byte38,39=0x03,0xFC', r, [0x03, 0xFC], results);
+      // 四隅(各コーナーの可視行1本ずつ、既出のx方向の計算を再利用)
+      r = await read(PLANE.B + 0 * ROW + 0, 1);
+      assertEqual('左上コーナー: row0 byte0=0xF8', r, [0xF8], results);
+      r = await read(PLANE.B + 0 * ROW + 79, 1);
+      assertEqual('右上コーナー: row0 byte79=0x1F', r, [0x1F], results);
+      r = await read(PLANE.B + 399 * ROW + 0, 1);
+      assertEqual('左下コーナー: row399 byte0=0xF8', r, [0xF8], results);
+      r = await read(PLANE.B + 399 * ROW + 79, 1);
+      assertEqual('右下コーナー: row399 byte79=0x1F', r, [0x1F], results);
+    });
+
+    console.log('\n--- 故障注入: probe_sprite(マスク無し版)はFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spritenomask.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      const row0OverlapOff = 60 * ROW;
+      const g = await page.evaluate((a, l) => window.p98probe.readMemory(a, l), PLANE.G + row0OverlapOff + 25, 1);
+      const brokenDetected = g[0] !== 0x04;
+      results.push({ label: '故障注入(マスク無し)は重ね描きの穴でGplaneが0x04にならない', ok: brokenDetected, actual: g, expected: 'not [4]' });
+      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(マスク無し) Gplane byte25 actual=[${bytesToHex(g)}] (正常なら0x04のはず)`);
+    });
+
+    console.log('\n--- 故障注入: probe_sprite(クリップ無し版)はFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spritenoclip.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      const mem = await page.evaluate((a, l) => window.p98probe.readMemory(a, l), PLANE.B + 211 * ROW + 0, 1);
+      const brokenDetected = mem[0] !== 0x00;
+      results.push({ label: '故障注入(クリップ無し)は次行の先頭バイトを汚す', ok: brokenDetected, actual: mem, expected: 'nonzero' });
+      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(クリップ無し)は次行の先頭バイトを汚す actual=[${bytesToHex(mem)}]`);
+    });
+
+    console.log('\n--- スプライト速度の基準取り (probe_sprite_bench / probe_sprite_bench0) ---');
+    // ゲスト側のBIOSティック(INT1Ah)は実時間と安定して対応しないことが実測で
+    // 分かった(tests/probe_sprite_bench.cのコメント参照)ため、ホスト
+    // (puppeteer)側のperformance.now()で「B:からPROBE_S*を実行してプロンプトへ
+    // 戻るまで」の実時間を測り、スプライトN本描く版(bench)と0本の版(bench0)の
+    // 差分を取ることで、init/quit等の固定オーバーヘッドを相殺した
+    // 「N本ぶんの描画にかかった時間」を求める。ノイズを減らすため3回ずつ測り
+    // 中央値を使う。
+    const SPRITE_BENCH_N = 40 * 50; // tests/probe_sprite_bench.c の BENCH_N*BENCH_ITERS と一致させる
+    const median = (arr) => { const s = [...arr].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+    let baseTimes = [];
+    let withTimes = [];
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/spritebench0.xdf`), PORT);
+      for (let i = 0; i < 3; i++) baseTimes.push(await page.evaluate(() => window.p98probe.runTimed('PROBE_S0', 15000)));
+      if (errors.length) console.log('page errors(bench0):', errors);
+      console.log(`baseline(0本描画)の実行時間: [${baseTimes.map((v) => v.toFixed(0)).join(', ')}]ms`);
+    });
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/spritebench.xdf`), PORT);
+      for (let i = 0; i < 3; i++) withTimes.push(await page.evaluate(() => window.p98probe.runTimed('PROBE_SB', 15000)));
+      if (errors.length) console.log('page errors(bench):', errors);
+      console.log(`${SPRITE_BENCH_N}本描画の実行時間: [${withTimes.map((v) => v.toFixed(0)).join(', ')}]ms`);
+    });
+    {
+      const baseMs = median(baseTimes);
+      const withMs = median(withTimes);
+      const perSpriteMs = (withMs - baseMs) / SPRITE_BENCH_N;
+      const spritesPerSecond = perSpriteMs > 0 ? 1000 / perSpriteMs : Infinity;
+      console.log(`中央値: baseline=${baseMs.toFixed(0)}ms, ${SPRITE_BENCH_N}本描画=${withMs.toFixed(0)}ms => 差分${(withMs - baseMs).toFixed(0)}ms`);
+      console.log(`1体あたり約${perSpriteMs.toFixed(3)}ms ≈ 約${spritesPerSecond.toFixed(0)}体/秒(このnp2kai実装上の相対値。実機のfpsではない)`);
+      const ok = Number.isFinite(perSpriteMs) && perSpriteMs > 0;
+      results.push({
+        label: 'スプライト速度の基準取りが完了(具体的な数値は合否判定の対象ではない。docs/verify-log.md参照)',
+        ok, actual: `約${spritesPerSecond.toFixed(0)}体/秒相当`, expected: '正の値が計測できていること',
+      });
+      console.log(ok ? 'OK   スプライト速度の基準取りが完了' : 'FAIL スプライト速度の基準取りに失敗(差分が0以下)');
+    }
 
     console.log('\n--- p98_quit後もDOSが生きている(コマンドを1つ実行してプロンプトが返る) ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {

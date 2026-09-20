@@ -37,3 +37,32 @@ _p98__outb:
     out     dx, al
     o32 leave
     retf
+
+; p98__blend_bits(seg, off, bits, mask) : void
+;   dst = (dst & ~mask) | (bits & mask)   (1回のES:[bx]読み書きで実施)
+;
+; スプライト描画(p98_draw_sprite, src/p98.c)の速度が要る内側ループ用に追加した
+; プリミティブ。引数の並び([bp+8]=seg, [bp+12]=off, [bp+16]=bits, [bp+20]=mask)は
+; 既存の p98__fillmem と同じ4引数パターン(型によらず各4バイトスロット)を
+; そのまま踏襲しており、新規に確認すべき事項は無い。VRAMセグメントをESへ直接
+; ロードする点も既存プリミティブ(p98__peekb/pokeb)と同じで、DS正規化に依存しない。
+;
+; ビット選択は (old ^ ((old ^ bits) & mask)) という定石で計算する
+; (mask=1の位置はbitsの値、mask=0の位置はoldの値になる)。
+    global _p98__blend_bits
+_p98__blend_bits:
+    push    ebp
+    movzx   ebp, sp
+    mov     ax, [bp+8]      ; seg
+    mov     es, ax
+    mov     bx, [bp+12]     ; off
+    mov     al, [es:bx]     ; old
+    mov     cl, [bp+16]     ; bits
+    mov     dl, [bp+20]     ; mask
+    mov     ah, al
+    xor     ah, cl          ; ah = old ^ bits
+    and     ah, dl          ; ah = (old ^ bits) & mask
+    xor     al, ah          ; al = old ^ ((old ^ bits) & mask)
+    mov     [es:bx], al
+    o32 leave
+    retf

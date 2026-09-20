@@ -1,4 +1,10 @@
 /*
+ * ★故障注入版(tests/p98_broken_spritenomask.c)★
+ * src/p98.c のコピーに対し p98_draw_sprite() のマスク処理だけを無効化してある
+ * (常に0xFFとして扱う=マスクの穴を無視して常に不透明に描く)。
+ * docs/verify-log.md の陰性対照(検査自体がFAILを検出できることの確認)専用。
+ * 通常のビルド・配布物には含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -493,8 +499,10 @@ void p98_draw_sprite(const p98_sprite_t *spr, int x, int y) {
 
             maskLo = (srcLo >= 0 && srcLo < srcStride) ? spr->mask[row * srcStride + srcLo] : 0;
             maskHi = (srcHi >= 0 && srcHi < srcStride) ? spr->mask[row * srcStride + srcHi] : 0;
-            maskByte = (unsigned char)((shift ? (maskLo >> shift) : maskLo) | (shift ? (unsigned char)(maskHi << (8 - shift)) : 0));
-            if (maskByte == 0) continue; /* このバイトは全ドット透明 */
+            /* ★故障注入版(tests/p98_broken_spritenomask.c)★ マスク処理を無効化し、
+             * 常に全ビット不透明として扱う。docs/verify-log.mdの陰性対照専用。 */
+            maskLo = maskLo; maskHi = maskHi; /* 未使用警告避け(元の計算は使わない) */
+            maskByte = 0xFF;
 
             off = rowOff + (unsigned)destByteIdx;
             for (p = 0; p < 4; p++) {

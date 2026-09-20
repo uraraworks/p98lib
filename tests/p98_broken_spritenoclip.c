@@ -1,4 +1,10 @@
 /*
+ * ★故障注入版(tests/p98_broken_spritenoclip.c)★
+ * src/p98.c のコピーに対し p98_draw_sprite() の横方向のクリップ(画面幅の
+ * バイト範囲チェック)だけを取り除いてある。docs/verify-log.md の陰性対照
+ * (検査自体がFAILを検出できることの確認)専用。通常のビルド・配布物には
+ * 含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -489,7 +495,9 @@ void p98_draw_sprite(const p98_sprite_t *spr, int x, int y) {
             unsigned off;
             int p;
 
-            if (destByteIdx < 0 || destByteIdx >= P98_BYTES_PER_LINE) continue;
+            /* ★故障注入版(tests/p98_broken_spritenoclip.c)★ 横方向のクリップ
+             * (destByteIdxの範囲チェック)を取り除いてある。docs/verify-log.mdの
+             * 陰性対照専用。 */
 
             maskLo = (srcLo >= 0 && srcLo < srcStride) ? spr->mask[row * srcStride + srcLo] : 0;
             maskHi = (srcHi >= 0 && srcHi < srcStride) ? spr->mask[row * srcStride + srcHi] : 0;
