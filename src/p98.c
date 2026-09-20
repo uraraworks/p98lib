@@ -36,24 +36,22 @@
 #define P98_PORT_PAL_RED    0xAC
 #define P98_PORT_PAL_BLUE   0xAE
 
-/* キーボード(IRQ1)。実測(docs/design.md「キーボード割り込みの実測」参照):
- *  - IRQ1 = INT 09h (IRQ0=08h/IRQ2=0Ahと同じ「IRQn -> INT(8+n)」規則どおりだったが、
- *    design.md旧稿のINT33h説は誤りだったので推測では確定しなかった)
- *  - マスクは既定で外れている(ポート0x02 bit1)
- *  - スキャンコードはポート0x41から読める。bit7が離した(break)を示す
- *  - EOI(0x20をポート0x00へ)を送らないと2回目以降の割り込みが来なくなる
- *    (故障注入で確認: EOI無しだと最初の1回しか来ない)
+/* キーボード。2026-09、IRQ1直接受信方式からBIOS(INT 18h)方式へ切替
+ * (docs/design.md参照)。理由: 生のIRQ1割り込みでは「押しっぱなしで
+ * break→makeが繰り返し来る」キーリピートを根本的に止められないことが
+ * 実測で分かったため。BIOSのキーセンス(AH=04h)は状態を読むだけで
+ * リピートの影響を受けない。
+ *
+ * INT 18h AH=04h(キーセンス、実測で確定。docs/design.md/verify-log.md参照):
+ *  - AL=グループ番号(0-15)を渡すと、AHにそのグループの8スキャンコード分の
+ *    押下状態がビットで返る。group=scancode>>3, bit=scancode&7, 1=押している
+ *  - ユーザー(1996年当時の本人の著作物、SAKA.ASM/SHUTING.ASM)のソースに
+ *    実例があり、そこから読み取った規則をnp2kai上のsendKey注入で独立に
+ *    実測して確認した(全数ではなく2キーぶんのサンプル実測。他はSAKA.ASM/
+ *    SHUTING.ASMの実例と整合)
+ *  - この呼び出しはキーバッファを消費しない。文字入力は別途AH=00h/01hを使う
  */
-#define P98_PORT_KBD_DATA   0x41
-#define P98_PORT_PIC0_MASK  0x02
-#define P98_PORT_PIC0_CMD   0x00
-#define P98_PIC_EOI         0x20
-#define P98_IRQ1_MASKBIT    0x02
-
-#define P98_SC_SHIFT        0x70
-#define P98_SC_CAPS         0x71
-#define P98_SC_CTRL         0x74
-#define P98_KBUF_SIZE       32
+#define P98_KBD_GROUPS        16
 
 #define P98_SEG_PLANE_B     0xA800
 #define P98_SEG_PLANE_R     0xB000
@@ -170,9 +168,6 @@ static unsigned char p98__saved_pal_r[16];
 static unsigned char p98__saved_pal_b[16];
 static unsigned p98__saved_int23_seg;
 static unsigned p98__saved_int23_off;
-static unsigned p98__saved_int09_seg;
-static unsigned p98__saved_int09_off;
-static unsigned char p98__saved_pic0_mask;
 
 /* Ctrl+C (INT 23h) を無害化するハンドラ。何もせず戻るだけ。
  * huge model の __interrupt 関数は全レジスタを push/pop し、iret で終わる
@@ -181,173 +176,63 @@ static void __interrupt p98__ctrlc_handler(void) {
 }
 
 /* =====================================================================
- * キーボード(IRQ1 = INT 09h。実測はsrc/p98.c冒頭の定数コメント参照)
+ * キーボード(BIOS INT 18h方式。IRQ1直接受信は廃止。docs/design.md参照)
  * ===================================================================== */
 
-/* 128スキャンコード分のビット配列(1bit/code)。 */
-static unsigned char p98__key_raw_down[16];   /* ハンドラが直接更新する「今押しているか」 */
-static unsigned char p98__key_edge_down[16];  /* ハンドラが押下のたびに立てる。p98_pollが読んでクリア */
-static unsigned char p98__key_cur_down[16];   /* p98_poll()時点のdownスナップショット */
-static unsigned char p98__key_pressed_snap[16]; /* p98_poll()時点のpressedスナップショット */
+/* 128スキャンコード分の押下状態(1bit/code)。BIOSのキーセンス(AH=04h)を
+ * p98_poll()で全16グループぶん読み、スナップショットとして持つ。 */
+static unsigned char p98__key_cur_down[P98_KBD_GROUPS];    /* 直近のp98_poll()時点 */
+static unsigned char p98__key_prev_down[P98_KBD_GROUPS];   /* 前回のp98_poll()時点 */
+static unsigned char p98__key_pressed_snap[P98_KBD_GROUPS];/* cur & ~prev(このpollで新規に押されたビット) */
 
-static unsigned char p98__kbuf[P98_KBUF_SIZE];
-static unsigned char p98__kbuf_head = 0; /* 次に書く位置 */
-static unsigned char p98__kbuf_tail = 0; /* 次に読む位置 */
-
-static unsigned char p98__mod_shift = 0; /* SHIFT: 押している間だけ */
-static unsigned char p98__mod_ctrl = 0;  /* CTRL: 押している間だけ */
-static unsigned char p98__mod_caps = 0;  /* CAPS: トグル(押した瞬間に反転) */
-
-/* スキャンコード -> 未シフト文字(WebNP2-wiki Keyboard.md のAL列)。0=文字なし。
- * かな/GRPH配列、機能キー・カーソルキー等(元からAL=0x00)は0のまま。 */
-static const unsigned char p98__chtab_base[128] = {
-    /*0x00*/ 0x1B,0x31,0x32,0x33,0x34,0x35,0x36,0x37,
-    /*0x08*/ 0x38,0x39,0x30,0x2D,0x5E,0x5C,0x08,0x09,
-    /*0x10*/ 0x71,0x77,0x65,0x72,0x74,0x79,0x75,0x69,
-    /*0x18*/ 0x6F,0x70,0x40,0x5B,0x0D,0x61,0x73,0x64,
-    /*0x20*/ 0x66,0x67,0x68,0x6A,0x6B,0x6C,0x3B,0x3A,
-    /*0x28*/ 0x5D,0x7A,0x78,0x63,0x76,0x62,0x6E,0x6D,
-    /*0x30*/ 0x2C,0x2E,0x2F,0x00,0x20,0x00,0x00,0x00,
-    /*0x38*/ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    /*0x40*/ 0x2D,0x2F,0x37,0x38,0x39,0x2A,0x34,0x35,
-    /*0x48*/ 0x36,0x2B,0x31,0x32,0x33,0x3D,0x30,0x2C,
-    /*0x50*/ 0x2E,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    /*0x58*/ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    /*0x60*/ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    /*0x68*/ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    /*0x70*/ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    /*0x78*/ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-};
-
-static unsigned char p98__is_letter(unsigned char code) {
-    if (code >= 0x10 && code <= 0x19) return 1; /* q..p */
-    if (code >= 0x1D && code <= 0x25) return 1; /* a..l */
-    if (code >= 0x29 && code <= 0x2F) return 1; /* z..m */
-    return 0;
+/* AH=04h キーセンス。AL=グループ番号(0-15)。戻り値(AH)の各ビットが
+ * group*8+bit のスキャンコードの押下状態(1=押している)。実測で確認済み
+ * (docs/verify-log.md参照。ユーザー本人の1996年のソース(SAKA.ASM/
+ * SHUTING.ASM)の実例とも一致)。バッファは消費しない。 */
+static unsigned char p98__kbd_sense(unsigned char group) {
+    asm("mov al, [bp+8]");
+    asm("mov ah, 0x04");
+    asm("int 0x18");
+    asm("movzx eax, ah");
 }
 
-/* SHIFT時の記号の変化。全件、BIOS(INT18h)基準の実測で確認済み
- * (docs/verify-log.md「SHIFT記号変換の全数実測」参照。BIOSが返す文字コードを
- * 正解とし、ROM内の変換テーブルは読み出していない)。KP_*(0x40-0x50)と
- * ESC/BS/TAB/ENTER/SPACE/0x0Aはここに載っていない=SHIFTで変化しない
- * (実測で確認済み)ため、switchに無いものはp98__key_to_char側でbase(未シフト値)
- * をそのまま返す。
- *
- * 実測で当初の推測から訂正した箇所(2026-09):
- *  - 0x0C('^')と0x1A('@')は当初逆に書いていた。実測の正解は
- *    0x0C→'`'(0x60)、0x1A→'~'(0x7E)。
- *  - 0x0D('\')のSHIFTは当初未実装(caseが無かった)。実測の正解は'|'(0x7C)。
- */
-static unsigned char p98__shifted_symbol(unsigned char code) {
-    switch (code) {
-        case 0x01: return 0x21; case 0x02: return 0x22; case 0x03: return 0x23;
-        case 0x04: return 0x24; case 0x05: return 0x25; case 0x06: return 0x26;
-        case 0x07: return 0x27; case 0x08: return 0x28; case 0x09: return 0x29;
-        case 0x0B: return 0x3D; /* - -> = */
-        case 0x0C: return 0x60; /* ^ -> ` (実測) */
-        case 0x0D: return 0x7C; /* \ -> | (実測) */
-        case 0x1A: return 0x7E; /* @ -> ~ (実測) */
-        case 0x1B: return 0x7B; /* [ -> { */
-        case 0x28: return 0x7D; /* ] -> } */
-        case 0x26: return 0x2B; /* ; -> + */
-        case 0x27: return 0x2A; /* : -> * */
-        case 0x30: return 0x3C; /* , -> < */
-        case 0x31: return 0x3E; /* . -> > */
-        case 0x32: return 0x3F; /* / -> ? */
-        case 0x33: return 0x5F; /* 実測: SHIFT+0x33 -> '_' */
-        default: return 0;
-    }
+/* AH=01h キーの有無を覗く(消費しない)。戻り値: 0=無し、それ以外=有り。 */
+static unsigned p98__kbd_peek(void) {
+    asm("mov ah, 0x01");
+    asm("int 0x18");
+    asm("mov al, bh");
+    asm("movzx eax, al");
 }
 
-static unsigned char p98__key_to_char(unsigned char code) {
-    unsigned char base = p98__chtab_base[code];
-    if (base == 0 && code != 0x33) return 0;
-
-    if (p98__is_letter(code)) {
-        unsigned char upper = (unsigned char)(p98__mod_shift ^ p98__mod_caps);
-        if (p98__mod_ctrl) {
-            unsigned char up = (unsigned char)(base - 0x20);
-            return (unsigned char)(up & 0x1F);
-        }
-        if (upper) return (unsigned char)(base - 0x20);
-        return base;
-    }
-
-    if (p98__mod_ctrl) return 0; /* 非文字キーのCTRL組み合わせは対象外 */
-
-    if (p98__mod_shift) {
-        unsigned char sh = p98__shifted_symbol(code);
-        if (sh) return sh;
-    }
-    return base;
+/* AH=00h キーを1件取り出す(無ければ待つ。呼ぶ前に必ずp98__kbd_peek()で
+ * 確認すること)。AH=スキャンコード、AL=文字コードがAXにまとまって返るので、
+ * 下位8bit(AL)だけを返す。 */
+static unsigned p98__kbd_get(void) {
+    asm("mov ah, 0x00");
+    asm("int 0x18");
+    asm("movzx eax, al");
 }
 
-static void p98__kbuf_push(unsigned char ch) {
-    unsigned char next = (unsigned char)((p98__kbuf_head + 1) % P98_KBUF_SIZE);
-    if (next == p98__kbuf_tail) return; /* 満杯なら黙って捨てる */
-    p98__kbuf[p98__kbuf_head] = ch;
-    p98__kbuf_head = next;
-}
-
-/* 割り込みハンドラ本体。ここでの仕事は最小限(状態更新とリングバッファへの
- * 積み込みだけ)。ポート入出力はp98__inb/p98__outb(bp相対asm、DS非依存)を
- * 再利用し、それ以外はグローバル変数への普通のC代入だけで済ませる
- * (huge modelのグローバルアクセスはコンパイラが毎回DSを積み直すため安全)。 */
-static void __interrupt p98__key_isr(void) {
-    unsigned char sc = p98__inb(P98_PORT_KBD_DATA);
-    unsigned char released = (unsigned char)(sc & 0x80);
-    unsigned char code = (unsigned char)(sc & 0x7F);
-    unsigned char idx = (unsigned char)(code >> 3);
-    unsigned char bit = (unsigned char)(1 << (code & 7));
-
-    /* オートリピート対策(実測で確認。docs/verify-log.md「キーリピートの実測」
-     * 参照): 生のIRQ1割り込みは、キーを押しっぱなしにすると約500ms後から
-     * 約50ms間隔で同じmakeコード(bit7=0)が繰り返し来る。BIOS(INT18h)側の
-     * リピートと同じ周期で、生のスキャンコードレベルでも再現することを
-     * 実測で確認した。何も対策しないと「1回押している間ずっとpressed()が
-     * 何度も真になる」「CAPSが1回の長押しで何度もトグルする」というバグに
-     * なるため、「直前から押されていなかった(was_down==0)」ときだけ
-     * edge_down/CAPSトグルを更新する(リピートのmakeコードは無視する)。 */
-    {
-        unsigned char was_down = (unsigned char)(p98__key_raw_down[idx] & bit);
-        if (released) {
-            p98__key_raw_down[idx] &= (unsigned char)~bit;
-        } else {
-            p98__key_raw_down[idx] |= bit;
-            if (!was_down) {
-                p98__key_edge_down[idx] |= bit;
-                if (code == P98_SC_CAPS) p98__mod_caps = (unsigned char)(p98__mod_caps ^ 1);
-            }
-        }
+/* BIOSのタイプアヘッドバッファを空にする。p98_quit()で必ず呼ぶ:
+ * キーセンス(AH=04h)はバッファを消費しないため、押しっぱなしにしていた
+ * キーのmake/breakがBIOSの16件バッファに残ったままp98_quit()を抜けると、
+ * 戻った先のCOMMAND.COM(や他のプログラム)がそれを入力として読んでしまう
+ * (実測で確認した副作用。docs/verify-log.md参照)。 */
+static void p98__kbd_drain(void) {
+    int guard = 0;
+    while (p98__kbd_peek() != 0 && guard < 32) {
+        p98__kbd_get();
+        guard++;
     }
-
-    if (code == P98_SC_SHIFT) {
-        p98__mod_shift = (unsigned char)(released ? 0 : 1);
-    } else if (code == P98_SC_CTRL) {
-        p98__mod_ctrl = (unsigned char)(released ? 0 : 1);
-    }
-
-    if (!released) {
-        unsigned char ch = p98__key_to_char(code);
-        if (ch) p98__kbuf_push(ch);
-    }
-
-    p98__outb(P98_PORT_PIC0_CMD, P98_PIC_EOI);
 }
 
 static void p98__key_reset_state(void) {
     int i;
-    for (i = 0; i < 16; i++) {
-        p98__key_raw_down[i] = 0;
-        p98__key_edge_down[i] = 0;
+    for (i = 0; i < P98_KBD_GROUPS; i++) {
         p98__key_cur_down[i] = 0;
+        p98__key_prev_down[i] = 0;
         p98__key_pressed_snap[i] = 0;
     }
-    p98__kbuf_head = 0;
-    p98__kbuf_tail = 0;
-    p98__mod_shift = 0;
-    p98__mod_ctrl = 0;
-    p98__mod_caps = 0;
 }
 
 /* =====================================================================
@@ -360,6 +245,8 @@ int p98_init(void) {
     unsigned handler_seg, handler_off;
 
     if (p98__inited) return 0;
+
+    p98__key_reset_state();
 
     /* パレットを退避(WebNP2-wiki: 0xA8/0xAA/0xAC/0xAEは読み出せる、と実測記載あり) */
     for (i = 0; i < 16; i++) {
@@ -378,20 +265,8 @@ int p98_init(void) {
     handler_off = (unsigned)(handler_addr & 0xFUL);
     p98__set_vector(0x23, handler_seg, handler_off);
 
-    /* キーボード(IRQ1=INT09h、実測)を奪う。ベクタとPICマスクを退避してから
-     * 差し替える。差し替えとマスク変更の間はcliで割り込みを止め、半端な
-     * ハンドラ(旧ベクタのまま新マスク、等)が実行されないようにする。 */
-    p98__key_reset_state();
-    p98__saved_int09_off = p98__get_vector_off(0x09);
-    p98__saved_int09_seg = p98__get_vector_seg(0x09);
-    handler_addr = (unsigned long)(void*)p98__key_isr;
-    handler_seg = (unsigned)(handler_addr >> 4);
-    handler_off = (unsigned)(handler_addr & 0xFUL);
-    asm("cli");
-    p98__set_vector(0x09, handler_seg, handler_off);
-    p98__saved_pic0_mask = p98__inb(P98_PORT_PIC0_MASK);
-    p98__outb(P98_PORT_PIC0_MASK, (unsigned char)(p98__saved_pic0_mask & (unsigned char)~P98_IRQ1_MASKBIT));
-    asm("sti");
+    /* キーボードはBIOS(INT18h)方式に切り替えたため、ベクタ横取り・PIC操作・
+     * EOI処理は一切行わない(docs/design.md参照)。 */
 
     /* 640x400 16色・グラフィック表示 */
     p98__int18_mode(0xC0);         /* 400ライン・表画面 */
@@ -425,14 +300,11 @@ void p98_quit(void) {
 
     p98__set_vector(0x23, p98__saved_int23_seg, p98__saved_int23_off);
 
-    /* キーボードのベクタとPICマスクを元へ戻す。マスクを戻し損なうと
-     * (あるいはベクタを戻さないままマスクだけ戻すと)以後の割り込みが
-     * DOS/BIOS側のハンドラでない場所へ来てハングしうるため、cliで囲んで
-     * 「マスクを戻す→ベクタを戻す」の順に不可分に行う。 */
-    asm("cli");
-    p98__outb(P98_PORT_PIC0_MASK, p98__saved_pic0_mask);
-    p98__set_vector(0x09, p98__saved_int09_seg, p98__saved_int09_off);
-    asm("sti");
+    /* BIOSのタイプアヘッドバッファを空にする。押しっぱなしのキーがあると
+     * ここでバッファに溜まったままの可能性があり、空にせずに戻ると
+     * COMMAND.COM(や次に動くプログラム)がそれを入力として読んでしまう
+     * (実測で確認した副作用。docs/verify-log.md参照)。 */
+    p98__kbd_drain();
 
     p98__inited = 0;
 }
@@ -568,14 +440,13 @@ void p98_set_palette(int index, int r, int g, int b) {
  * ===================================================================== */
 
 void p98_poll(void) {
-    int i;
-    asm("cli");
-    for (i = 0; i < 16; i++) {
-        p98__key_pressed_snap[i] = p98__key_edge_down[i];
-        p98__key_edge_down[i] = 0;
-        p98__key_cur_down[i] = p98__key_raw_down[i];
+    int g;
+    for (g = 0; g < P98_KBD_GROUPS; g++) {
+        unsigned char mask = p98__kbd_sense((unsigned char)g);
+        p98__key_pressed_snap[g] = (unsigned char)(mask & (unsigned char)~p98__key_prev_down[g]);
+        p98__key_prev_down[g] = mask;
+        p98__key_cur_down[g] = mask;
     }
-    asm("sti");
 }
 
 int p98_key_down(int scancode) {
@@ -589,12 +460,6 @@ int p98_key_pressed(int scancode) {
 }
 
 int p98_key_getch(void) {
-    int result = 0;
-    asm("cli");
-    if (p98__kbuf_head != p98__kbuf_tail) {
-        result = p98__kbuf[p98__kbuf_tail];
-        p98__kbuf_tail = (unsigned char)((p98__kbuf_tail + 1) % P98_KBUF_SIZE);
-    }
-    asm("sti");
-    return result;
+    if (p98__kbd_peek() == 0) return 0;
+    return (int)p98__kbd_get();
 }

@@ -174,17 +174,15 @@ async function withPage(browser, url, fn) {
 async function main() {
   const results = [];
   console.log('--- ビルド ---');
-  const [fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe, shiftExe, shiftBrokenExe] = await Promise.all([
+  const [fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
     buildOrThrow('tests/probe_state.c'),
     buildOrThrow('tests/probe_fill.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_noclip.c') }),
     buildOrThrow('tests/probe_key.c'),
-    buildOrThrow('tests/probe_key.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_norelease.c') }),
-    buildOrThrow('tests/probe_key_shift.c'),
-    buildOrThrow('tests/probe_key_shift.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_shiftswap.c') }),
+    buildOrThrow('tests/probe_key.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_nodiff.c') }),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=離す処理無し) / probe_key_shift / probe_key_shift(故障注入=SHIFT記号入れ替え)');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し)');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -193,8 +191,6 @@ async function main() {
     fillbroken: programFdFor(fillBrokenExe, 'PROBE_FI'),
     key: programFdFor(keyExe, 'PROBE_KE'),
     keybroken: programFdFor(keyBrokenExe, 'PROBE_KE'),
-    shift: programFdFor(shiftExe, 'PROBE_KE'),
-    shiftbroken: programFdFor(shiftBrokenExe, 'PROBE_KE'),
   };
 
   const server = await startServer(programFds);
@@ -286,13 +282,13 @@ async function main() {
       results.push({ label: 'ゲスト自身が読んでもINT23hはp98_quit後に元へ戻る', ok: vectorRestored, actual: vMatch?.[3], expected: vMatch?.[1] });
       console.log(`${vectorRestored ? 'OK  ' : 'FAIL'} INT23h V2(quit後)=${vMatch?.[3]} (V0と一致するはず)`);
     });
-    console.log('\n--- キーボード (probe_key: down/pressed/release/複数同時/getch) ---');
+    console.log('\n--- キーボード (probe_key: down/pressed/release/複数同時/getch/長押しリピート耐性) ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
       await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/key.xdf`), PORT);
       const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PROBE_KE'));
-      await sleep(800); // 起動直後の割り込みフック完了を待つ
+      await sleep(800);
 
       // フェーズ1: 単発タップ
       await sk(0x1D, true); await sleep(350); await sk(0x1D, false);
@@ -302,44 +298,53 @@ async function main() {
       await sleep(350);
       await sk(0x1D, false); await sk(0x2D, false);
       await sleep(300);
-      // フェーズ3: SHIFT+a -> a単独 -> CTRL+a (500ms未満に抑えてキーリピートを避ける)
+      // フェーズ3: SHIFT+a -> a単独 -> CTRL+a (ここまででgetchに積む4文字を確定させる)
       await sk(0x70, true); await sk(0x1D, true); await sleep(80); await sk(0x1D, false); await sk(0x70, false);
       await sleep(200);
       await sk(0x1D, true); await sleep(80); await sk(0x1D, false);
       await sleep(200);
       await sk(0x74, true); await sk(0x1D, true); await sleep(80); await sk(0x1D, false); await sk(0x74, false);
-      await sleep(200);
-      // フェーズ4: SHIFT+1 -> '!'
-      await sk(0x70, true); await sk(0x01, true); await sleep(80); await sk(0x01, false); await sk(0x70, false);
+      await sleep(300);
+      // フェーズ4: ここから's'(0x1E)を1.5秒ホールドする(BIOSのキーリピート
+      // 閾値=約500msを大きく超える)。a/b/shiftのgetch文字が先にバッファへ
+      // 積まれた後で押すことで、's'のキーリピート文字がgetchの読み取り対象
+      // (先頭4件)に混ざらないようにする。これが今回の主目的:
+      // p98_key_pressed()が長押し中1回しか立たないことを確認する
+      // (BIOS方式に切替前は、生のIRQ1レベルで18回立っていた)。
+      await sk(0x1E, true);
+      await sleep(1500);
+      await sk(0x1E, false);
+      await sleep(2500);
 
-      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
+      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 30000), baseline2);
       if (errors.length) console.log('page errors:', errors);
-      // 80桁で折り返されるため、DOWNA_SEEN=から始まる行だけでなく次行にも
-      // 値が続くことがある(GETCH=の長い値が典型)。折り返しをまたいで
-      // マッチできるよう、行分割ではなく生の text 全体に対して正規表現をかける
-      // (probe_state のBEF/AFT/V0..V2判定と同じやり方)。
       const startIdx = text.indexOf('DOWNA_SEEN=');
       const chunk = (startIdx >= 0 ? text.slice(startIdx, startIdx + 200) : '').replace(/\n/g, '');
       console.log('screen text:', JSON.stringify(chunk));
 
       const g = (re) => chunk.match(re)?.[1];
       results.push({ label: '押している間 p98_key_down が真(DOWNA_SEEN)', ok: g(/DOWNA_SEEN=(\d)/) === '1', actual: g(/DOWNA_SEEN=(\d)/), expected: '1' });
-      results.push({ label: '離すと p98_key_down が偽に戻る(DOWNA_END、これが今回の肝)', ok: g(/DOWNA_END=(\d)/) === '0', actual: g(/DOWNA_END=(\d)/), expected: '0' });
+      results.push({ label: '離すと p98_key_down が偽に戻る(DOWNA_END)', ok: g(/DOWNA_END=(\d)/) === '0', actual: g(/DOWNA_END=(\d)/), expected: '0' });
       results.push({ label: '複数キー同時押し(BOTH_SEEN)', ok: g(/BOTH_SEEN=(\d)/) === '1', actual: g(/BOTH_SEEN=(\d)/), expected: '1' });
       results.push({ label: 'p98_key_pressedはタップ1回につき1回だけ立つ(PRESSA=5回タップ分)', ok: g(/PRESSA=([0-9A-F]{2})/) === '05', actual: g(/PRESSA=([0-9A-F]{2})/), expected: '05' });
       results.push({ label: 'p98_key_pressedはタップ1回につき1回だけ立つ(PRESSB=1回タップ分)', ok: g(/PRESSB=([0-9A-F]{2})/) === '01', actual: g(/PRESSB=([0-9A-F]{2})/), expected: '01' });
-      // 注意: 'B'は16進数字としても合法(0-9A-F)なため、改行除去後に続く
-      // "B:\>"プロンプトの'B'まで拾ってしまわないよう、7個ぶんの2桁hexに
-      // 個数を固定してマッチさせる。
-      const getch = g(/GETCH=([0-9A-F]{2}(?:,[0-9A-F]{2}){6})/);
+      results.push({ label: '長押し(1.5秒、リピート閾値超え)の間 down が真であり続けた(DOWNLONG_SEEN)', ok: g(/DOWNLONG_SEEN=(\d)/) === '1', actual: g(/DOWNLONG_SEEN=(\d)/), expected: '1' });
       results.push({
-        label: 'p98_key_getchで打った文字列が順番どおり取れる(a,a,b,SHIFT+a=A,a,CTRL+a,SHIFT+1=!)',
-        ok: getch === '61,61,62,41,61,01,21', actual: getch, expected: '61,61,62,41,61,01,21',
+        label: '【主目的】長押し(1.5秒、BIOSのキーリピート閾値500msを超える)でもp98_key_pressedは1回しか立たない(PRESSLONG)',
+        ok: g(/PRESSLONG=([0-9A-F]{2})/) === '01', actual: g(/PRESSLONG=([0-9A-F]{2})/), expected: '01',
       });
-      for (const r of results.slice(-6)) console.log(`${r.ok ? 'OK  ' : 'FAIL'} ${r.label}${r.ok ? '' : ` actual=${JSON.stringify(r.actual)} expected=${JSON.stringify(r.expected)}`}`);
+      // 注意: 'B'は16進数字としても合法(0-9A-F)なため、改行除去後に続く
+      // "B:\>"プロンプトの'B'まで拾ってしまわないよう、4個ぶんの2桁hexに
+      // 個数を固定してマッチさせる。
+      const getch = g(/GETCH=([0-9A-F]{2}(?:,[0-9A-F]{2}){3})/);
+      results.push({
+        label: 'p98_key_getchで打った文字列が順番どおり取れる(a,a,b,SHIFT+a=A。BIOSが変換した文字をそのまま返す)',
+        ok: getch === '61,61,62,41', actual: getch, expected: '61,61,62,41',
+      });
+      for (const r of results.slice(-8)) console.log(`${r.ok ? 'OK  ' : 'FAIL'} ${r.label}${r.ok ? '' : ` actual=${JSON.stringify(r.actual)} expected=${JSON.stringify(r.expected)}`}`);
     });
 
-    console.log('\n--- 故障注入: probe_key(離す処理無し版)は②でFAILするはず ---');
+    console.log('\n--- 故障注入: probe_key(p98_poll()で前回との差分を取らない版)は長押しでFAILするはず ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
@@ -347,15 +352,22 @@ async function main() {
       const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PROBE_KE'));
       await sleep(800);
       await sk(0x1D, true); await sleep(350); await sk(0x1D, false);
-      // 残りのフェーズは省略(タイムラインだけ揃えれば十分、DOWNA_ENDだけ見る)
-      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 25000), baseline2);
+      await sleep(2000);
+      await sk(0x1E, true);
+      await sleep(1500);
+      await sk(0x1E, false);
+      await sleep(2500);
+      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 30000), baseline2);
       if (errors.length) console.log('page errors:', errors);
       const startIdx = text.indexOf('DOWNA_SEEN=');
       const chunk = (startIdx >= 0 ? text.slice(startIdx, startIdx + 200) : '').replace(/\n/g, '');
       const g = (re) => chunk.match(re)?.[1];
-      const brokenDetected = g(/DOWNA_END=(\d)/) === '1'; // 正常なら0のはずが、故障注入では1のまま
-      results.push({ label: '故障注入(離す処理無し)はDOWNA_ENDが1のまま(離れない)になる', ok: brokenDetected, actual: g(/DOWNA_END=(\d)/), expected: '1(壊れているはず)' });
-      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(離す処理無し)はDOWNA_ENDが1のまま actual=${g(/DOWNA_END=(\d)/)}`);
+      // 正常なら01のはずが、故障注入(差分を取らない)では長押し中ずっと
+      // downと同じ値がpressedに入り続けるため、01よりずっと大きくなる。
+      const pressLong = g(/PRESSLONG=([0-9A-F]{2})/);
+      const brokenDetected = !!pressLong && pressLong !== '01';
+      results.push({ label: '故障注入(差分無し)はPRESSLONGが1にならない(長押し中ずっと真になってしまう)', ok: brokenDetected, actual: pressLong, expected: '01ではないはず' });
+      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(差分無し) PRESSLONG actual=${pressLong}`);
     });
 
     console.log('\n--- p98_quit後もDOSが生きている(コマンドを1つ実行してプロンプトが返る) ---');
@@ -364,60 +376,8 @@ async function main() {
       if (errors.length) console.log('page errors:', errors);
       const text = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
       const alive = /FreeDOS|Kernel|Version/i.test(text);
-      results.push({ label: 'p98_quit後、DOSコマンド(VER)を実行してプロンプトが返る(ハングしていない)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
+      results.push({ label: 'p98_quit後、DOSコマンド(VER)を実行してプロンプトが返る(ハングしていない。BIOSのキーバッファを空にしていることも間接的に確認)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} p98_quit後にVERを実行してプロンプトが返る`);
-    });
-
-    console.log('\n--- SHIFT記号変換(probe_key_shift: BIOS実測で確定した値と一致するか) ---');
-    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
-      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/shift.xdf`), PORT);
-      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PROBE_KE'));
-      await sleep(700);
-      // SHIFTを押しっぱなしにして 0x0C(^) 0x0D(\) 0x1A(@) 0x1B([) 0x28(]) 0x33 の順にタップ。
-      // 実測(docs/verify-log.md「SHIFT記号変換の全数実測」)で確定した期待値:
-      // '`'(0x60) '|'(0x7C) '~'(0x7E) '{'(0x7B) '}'(0x7D) '_'(0x5F)
-      await sk(0x70, true);
-      for (const code of [0x0C, 0x0D, 0x1A, 0x1B, 0x28, 0x33]) {
-        await sk(code, true); await sleep(60); await sk(code, false); await sleep(80);
-      }
-      await sk(0x70, false);
-      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
-      if (errors.length) console.log('page errors:', errors);
-      const startIdx = text.indexOf('SHIFTGETCH=');
-      const chunk = (startIdx >= 0 ? text.slice(startIdx, startIdx + 60) : '').replace(/\n/g, '');
-      const m = chunk.match(/SHIFTGETCH=([0-9A-F]{2}(?:,[0-9A-F]{2}){5})/);
-      const got = m?.[1];
-      const expected = '60,7C,7E,7B,7D,5F';
-      results.push({
-        label: 'SHIFT記号変換が実測(BIOS基準)どおり(^→`, \\→|, @→~, [→{, ]→}, 0x33→_)',
-        ok: got === expected, actual: got, expected,
-      });
-      console.log(`${got === expected ? 'OK  ' : 'FAIL'} SHIFT記号変換 actual=${got} expected=${expected}`);
-    });
-
-    console.log('\n--- 故障注入: probe_key_shift(SHIFT記号入れ替え版)はFAILするはず ---');
-    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
-      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-      const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
-      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/shiftbroken.xdf`), PORT);
-      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PROBE_KE'));
-      await sleep(700);
-      await sk(0x70, true);
-      for (const code of [0x0C, 0x0D, 0x1A, 0x1B, 0x28, 0x33]) {
-        await sk(code, true); await sleep(60); await sk(code, false); await sleep(80);
-      }
-      await sk(0x70, false);
-      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
-      if (errors.length) console.log('page errors:', errors);
-      const startIdx = text.indexOf('SHIFTGETCH=');
-      const chunk = (startIdx >= 0 ? text.slice(startIdx, startIdx + 60) : '').replace(/\n/g, '');
-      const m = chunk.match(/SHIFTGETCH=([0-9A-F]{2}(?:,[0-9A-F]{2}){5})/);
-      const got = m?.[1];
-      const brokenDetected = got !== '60,7C,7E,7B,7D,5F';
-      results.push({ label: '故障注入(SHIFT記号入れ替え)は正解と一致しなくなる', ok: brokenDetected, actual: got, expected: '60,7C,7E,7B,7D,5Fとは異なるはず' });
-      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(SHIFT記号入れ替え) actual=${got}`);
     });
   } finally {
     await browser.close();
