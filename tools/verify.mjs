@@ -174,15 +174,17 @@ async function withPage(browser, url, fn) {
 async function main() {
   const results = [];
   console.log('--- ビルド ---');
-  const [fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe] = await Promise.all([
+  const [fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe, shiftExe, shiftBrokenExe] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
     buildOrThrow('tests/probe_state.c'),
     buildOrThrow('tests/probe_fill.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_noclip.c') }),
     buildOrThrow('tests/probe_key.c'),
     buildOrThrow('tests/probe_key.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_norelease.c') }),
+    buildOrThrow('tests/probe_key_shift.c'),
+    buildOrThrow('tests/probe_key_shift.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_shiftswap.c') }),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=離す処理無し)');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=離す処理無し) / probe_key_shift / probe_key_shift(故障注入=SHIFT記号入れ替え)');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -191,6 +193,8 @@ async function main() {
     fillbroken: programFdFor(fillBrokenExe, 'PROBE_FI'),
     key: programFdFor(keyExe, 'PROBE_KE'),
     keybroken: programFdFor(keyBrokenExe, 'PROBE_KE'),
+    shift: programFdFor(shiftExe, 'PROBE_KE'),
+    shiftbroken: programFdFor(shiftBrokenExe, 'PROBE_KE'),
   };
 
   const server = await startServer(programFds);
@@ -362,6 +366,58 @@ async function main() {
       const alive = /FreeDOS|Kernel|Version/i.test(text);
       results.push({ label: 'p98_quit後、DOSコマンド(VER)を実行してプロンプトが返る(ハングしていない)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} p98_quit後にVERを実行してプロンプトが返る`);
+    });
+
+    console.log('\n--- SHIFT記号変換(probe_key_shift: BIOS実測で確定した値と一致するか) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/shift.xdf`), PORT);
+      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PROBE_KE'));
+      await sleep(700);
+      // SHIFTを押しっぱなしにして 0x0C(^) 0x0D(\) 0x1A(@) 0x1B([) 0x28(]) 0x33 の順にタップ。
+      // 実測(docs/verify-log.md「SHIFT記号変換の全数実測」)で確定した期待値:
+      // '`'(0x60) '|'(0x7C) '~'(0x7E) '{'(0x7B) '}'(0x7D) '_'(0x5F)
+      await sk(0x70, true);
+      for (const code of [0x0C, 0x0D, 0x1A, 0x1B, 0x28, 0x33]) {
+        await sk(code, true); await sleep(60); await sk(code, false); await sleep(80);
+      }
+      await sk(0x70, false);
+      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
+      if (errors.length) console.log('page errors:', errors);
+      const startIdx = text.indexOf('SHIFTGETCH=');
+      const chunk = (startIdx >= 0 ? text.slice(startIdx, startIdx + 60) : '').replace(/\n/g, '');
+      const m = chunk.match(/SHIFTGETCH=([0-9A-F]{2}(?:,[0-9A-F]{2}){5})/);
+      const got = m?.[1];
+      const expected = '60,7C,7E,7B,7D,5F';
+      results.push({
+        label: 'SHIFT記号変換が実測(BIOS基準)どおり(^→`, \\→|, @→~, [→{, ]→}, 0x33→_)',
+        ok: got === expected, actual: got, expected,
+      });
+      console.log(`${got === expected ? 'OK  ' : 'FAIL'} SHIFT記号変換 actual=${got} expected=${expected}`);
+    });
+
+    console.log('\n--- 故障注入: probe_key_shift(SHIFT記号入れ替え版)はFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/shiftbroken.xdf`), PORT);
+      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PROBE_KE'));
+      await sleep(700);
+      await sk(0x70, true);
+      for (const code of [0x0C, 0x0D, 0x1A, 0x1B, 0x28, 0x33]) {
+        await sk(code, true); await sleep(60); await sk(code, false); await sleep(80);
+      }
+      await sk(0x70, false);
+      const text = await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
+      if (errors.length) console.log('page errors:', errors);
+      const startIdx = text.indexOf('SHIFTGETCH=');
+      const chunk = (startIdx >= 0 ? text.slice(startIdx, startIdx + 60) : '').replace(/\n/g, '');
+      const m = chunk.match(/SHIFTGETCH=([0-9A-F]{2}(?:,[0-9A-F]{2}){5})/);
+      const got = m?.[1];
+      const brokenDetected = got !== '60,7C,7E,7B,7D,5F';
+      results.push({ label: '故障注入(SHIFT記号入れ替え)は正解と一致しなくなる', ok: brokenDetected, actual: got, expected: '60,7C,7E,7B,7D,5Fとは異なるはず' });
+      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(SHIFT記号入れ替え) actual=${got}`);
     });
   } finally {
     await browser.close();

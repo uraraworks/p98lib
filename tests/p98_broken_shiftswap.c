@@ -1,4 +1,10 @@
 /*
+ * ★故障注入版(tests/p98_broken_shiftswap.c)★
+ * src/p98.c のコピーに対し、SHIFT記号変換のうち実測で訂正した3件
+ * (0x0C/0x1Aの入れ替え、0x0Dの欠落)をわざと実測前の誤った状態に戻してある。
+ * docs/verify-log.mdの陰性対照(検査がこの誤りを検出できるか)専用。
+ * 通常のビルド・配布物には含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -244,9 +250,10 @@ static unsigned char p98__shifted_symbol(unsigned char code) {
         case 0x04: return 0x24; case 0x05: return 0x25; case 0x06: return 0x26;
         case 0x07: return 0x27; case 0x08: return 0x28; case 0x09: return 0x29;
         case 0x0B: return 0x3D; /* - -> = */
-        case 0x0C: return 0x60; /* ^ -> ` (実測) */
-        case 0x0D: return 0x7C; /* \ -> | (実測) */
-        case 0x1A: return 0x7E; /* @ -> ~ (実測) */
+        /* ★故障注入: 実測前の推測に戻す(0x0C/0x1Aを入れ替え、0x0Dを欠落させる)。
+         * docs/verify-log.mdの陰性対照専用。通常のビルド・配布物には含めない。 */
+        case 0x0C: return 0x7E; /* (誤り)^ -> ~ */
+        case 0x1A: return 0x60; /* (誤り)@ -> ` */
         case 0x1B: return 0x7B; /* [ -> { */
         case 0x28: return 0x7D; /* ] -> } */
         case 0x26: return 0x2B; /* ; -> + */
