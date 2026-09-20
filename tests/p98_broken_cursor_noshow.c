@@ -1,4 +1,11 @@
 /*
+ * ★故障注入版(tests/p98_broken_cursor_noshow.c)★
+ * src/p98.c のコピーに対し、p98_quit()でカーソルを表示に戻す呼び出し
+ * (p98__int18_ah(0x11))を削除してある(コメントアウトのみ、削除した理由の
+ * コメントは残す)。docs/verify-log.mdの陰性対照(「p98_quit後にDOSプロンプトへ
+ * 戻ったことを検出できる」検査自体が、戻し忘れをFAILとして検出できることの
+ * 確認)専用。通常のビルド・配布物には含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -422,18 +429,9 @@ void p98_quit(void) {
     p98__outb(P98_PORT_DRAW_PAGE, 0);
     p98__int18_mode(0xC0);               /* 400ライン・表画面へ戻す */
 
-    /* カーソルを必ず表示に戻す(p98__hide_text_on_initの値に関わらず、
-     * 常に呼ぶ。既に表示されている場合は無害な冪等操作)。
-     *
-     * 【重要】このAH=0x11呼び出しを外すと、単に見た目が悪くなるだけでは
-     * 済まない: WorkbenchNP2 ide/dos-prompt.mjs の currentDosPrompt() は
-     * `screen.cursor`(=カーソルが非表示だとnull)が無いと常にnullを返す
-     * ため、tools/verify.mjsが多用する waitForCurrentDosPrompt() が
-     * **永久にDOSプロンプトを検出できずタイムアウトする**(このライブラリの
-     * 検証全体が動かなくなる)。故障注入版
-     * tests/p98_broken_cursor_noshow.c で実際にこの現象を確認している
-     * (docs/verify-log.md参照)。 */
-    p98__int18_ah(0x11);
+    /* ★故障注入: 本来はここで p98__int18_ah(0x11) を呼んでカーソルを
+     * 表示に戻すはずだが、意図的に削除してある(コメントのみ残す)。
+     * これによりp98_quit()後もカーソルが非表示のままになる。 */
 
     for (i = 0; i < 16; i++) {
         p98__outb(P98_PORT_PAL_INDEX, (unsigned char)i);

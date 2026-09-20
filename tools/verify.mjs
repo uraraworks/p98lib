@@ -233,6 +233,7 @@ async function main() {
     bgpageExe, bgpageBrokenExe, bgpageBenchFullExe, bgpageBenchDiffExe, bgpageBench0BgExe,
     walk2AssetsExe, walk2AssetsBrokenExe, walk2Exe,
     walk2BenchFullExe, walk2BenchDiffExe, walk2Bench0BgExe,
+    stateCursorBrokenExe, cursorExe, cursorBrokenExe,
   ] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
@@ -261,8 +262,11 @@ async function main() {
     buildOrThrow('tests/probe_walk2_bench_full.c'),
     buildOrThrow('tests/probe_walk2_bench_diff.c'),
     buildOrThrow('tests/probe_walk2_bench0_bg.c'),
+    buildOrThrow('tests/probe_state.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_cursor_noshow.c') }),
+    buildOrThrow('tests/probe_cursor.c'),
+    buildOrThrow('tests/probe_cursor.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_cursor_noshow.c') }),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_state(故障注入=カーソル復帰無し)');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -289,6 +293,9 @@ async function main() {
     walk2assets: programFdFor(walk2AssetsExe, 'PROBE_WA'),
     walk2assetsbroken: programFdFor(walk2AssetsBrokenExe, 'PROBE_WA'),
     walk2: programFdFor(walk2Exe, 'WALK2'),
+    statecursorbroken: programFdFor(stateCursorBrokenExe, 'PROBE_ST'),
+    cursor: programFdFor(cursorExe, 'PROBE_CU'),
+    cursorbroken: programFdFor(cursorBrokenExe, 'PROBE_CU'),
     walk2benchfull: programFdFor(walk2BenchFullExe, 'PROBE_W1'),
     walk2benchdiff: programFdFor(walk2BenchDiffExe, 'PROBE_W2'),
     walk2bench0bg: programFdFor(walk2Bench0BgExe, 'PROBE_W3'),
@@ -383,6 +390,79 @@ async function main() {
       results.push({ label: 'ゲスト自身が読んでもINT23hはp98_quit後に元へ戻る', ok: vectorRestored, actual: vMatch?.[3], expected: vMatch?.[1] });
       console.log(`${vectorRestored ? 'OK  ' : 'FAIL'} INT23h V2(quit後)=${vMatch?.[3]} (V0と一致するはず)`);
     });
+
+    // ---- テキスト画面とカーソルの後始末(2026-09後半、docs/design.md参照) ----
+    // WorkbenchNP2 ide/dos-prompt.mjs の currentDosPrompt() は
+    // `screen.cursor`(engine.getScreenText().cursor、カーソル非表示だとnull)を
+    // 見てDOSプロンプトを判定している。つまり「カーソルが表示に戻っているか」は
+    // このライブラリの見た目の問題であるだけでなく、**この検証ハーネス自体が
+    // 正しく動くための前提**でもある(既存のwaitForCurrentDosPrompt依存の
+    // 検査を壊さないための直接確認)。
+    console.log('\n--- テキスト画面とカーソルの後始末(p98_init:テキスト消去+カーソル非表示 / p98_quit:カーソル表示に復帰) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      // 1) p98_init()中(グラフィックモードのまま静止するprobe_fill.c)は
+      //    カーソルが非表示(getScreenText().cursor === null)のはず。
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/fill.xdf`, 'PROBE_FI', { waitMs: 2000 }), PORT);
+      if (errors.length) console.log('page errors(fill):', errors);
+      const cursorDuringInit = await page.evaluate(() => window.p98probe.engine.getScreenText().cursor);
+      const hiddenDuringInit = cursorDuringInit === null;
+      results.push({ label: '[テキスト後始末] p98_init()中はカーソルが非表示(cursor===null)', ok: hiddenDuringInit, actual: JSON.stringify(cursorDuringInit), expected: 'null' });
+      console.log(`${hiddenDuringInit ? 'OK  ' : 'FAIL'} [テキスト後始末] init中カーソル非表示 actual=${JSON.stringify(cursorDuringInit)}`);
+    });
+
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      // 2) probe_state.c(p98_init()→p98_quit()→print→exit)実行後はDOSへ
+      //    戻り、カーソルが表示に戻っている(getScreenText().cursor !== null)。
+      //    既存のwaitForCurrentDosPrompt依存の検査(以降の全節)が動いている
+      //    こと自体がこの復帰の間接証拠でもあるが、ここでは直接cursorの値を見る
+      //    (「検査が見るべきものを見るように直す」ため、プロンプト文字列の
+      //    有無だけで判定しない)。
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/state.xdf`, 'PROBE_ST', { waitForExit: true }), PORT);
+      if (errors.length) console.log('page errors(state):', errors);
+      const cursorAfterQuit = await page.evaluate(() => window.p98probe.engine.getScreenText().cursor);
+      const shownAfterQuit = cursorAfterQuit !== null;
+      results.push({ label: '[テキスト後始末] p98_quit()後はカーソルが表示に戻る(cursor!==null)', ok: shownAfterQuit, actual: JSON.stringify(cursorAfterQuit), expected: 'not null' });
+      console.log(`${shownAfterQuit ? 'OK  ' : 'FAIL'} [テキスト後始末] quit後カーソル表示 actual=${JSON.stringify(cursorAfterQuit)}`);
+    });
+
+    // 【当初の想定が誤りだったことの記録】最初はここで「カーソル復帰を外した
+    // 版はwaitForCurrentDosPrompt()がタイムアウトする」ことを故障注入検査に
+    // しようとしたが、実測すると**タイムアウトしなかった**(=検出できな
+    // かった)。原因を調べると、COMMAND.COMがプロンプトを表示する際に
+    // カーソルを自分で表示状態へ戻す(実測で確認: p98_quit()の呼び出しを
+    // 完全に無視しても、DOSプロンプトへ戻った時点ではcursorが非nullになる)
+    // ため、「DOSプロンプトへ戻った後にcursorを見る」という検査方法では
+    // p98_quit()自身がカーソルを戻したのか、COMMAND.COMが戻したのかを
+    // 区別できないと判明した。そこで検査方法を変更し、
+    // tests/probe_cursor.c(p98_quit()の直後、COMMAND.COMへ戻る前に
+    // このプログラム自身がしばらく静止する)を使って、「COMMAND.COMが
+    // 介入する前の、p98_quit()自身が残した状態」を直接見る方式にした。
+    console.log('\n--- カーソル復帰(probe_cursor.c: p98_quit()直後、COMMAND.COMへ戻る前にカーソル状態を直接確認) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/cursor.xdf`), PORT);
+      await page.evaluate(() => window.p98probe.runNoWait('PROBE_CU'));
+      await sleep(1000); // probe_cursor.cはp98_quit()の後、約2秒(120フレーム)静止する
+      const cursor = await page.evaluate(() => window.p98probe.engine.getScreenText().cursor);
+      const ok = cursor !== null;
+      results.push({ label: '[カーソル復帰] p98_quit()直後(COMMAND.COMへ戻る前)にカーソルが表示に戻っている', ok, actual: JSON.stringify(cursor), expected: 'not null' });
+      console.log(`${ok ? 'OK  ' : 'FAIL'} [カーソル復帰] quit直後カーソル表示 actual=${JSON.stringify(cursor)}`);
+      if (errors.length) console.log('page errors(cursor):', errors);
+    });
+
+    console.log('\n--- 故障注入: probe_cursor(p98_broken_cursor_noshow版)はp98_quit()直後もカーソル非表示のままのはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/cursorbroken.xdf`), PORT);
+      await page.evaluate(() => window.p98probe.runNoWait('PROBE_CU'));
+      await sleep(1000);
+      const cursor = await page.evaluate(() => window.p98probe.engine.getScreenText().cursor);
+      const detected = cursor === null;
+      results.push({ label: '[カーソル復帰故障注入] カーソル復帰を外すとp98_quit()直後もcursor===nullのまま(検出できる)', ok: detected, actual: JSON.stringify(cursor), expected: 'null' });
+      console.log(`${detected ? 'OK  ' : 'FAIL'} [カーソル復帰故障注入] 復帰忘れを検出 actual=${JSON.stringify(cursor)}`);
+      if (errors.length) console.log('page errors(cursorbroken):', errors);
+    });
+
     console.log('\n--- キーボード (probe_key: down/pressed/release/複数同時/getch/長押しリピート耐性) ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -776,7 +856,7 @@ async function main() {
       await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
       if (errors.length) console.log('page errors:', errors);
       const verText = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
-      const alive = /FreeDOS|Kernel|Version/i.test(verText);
+      const alive = /FreeCom/i.test(verText);
       results.push({ label: '[walk] ESCで終了後、DOSコマンド(VER)が正常応答する', ok: alive, actual: alive ? '応答あり' : verText.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} [walk] ESC終了後にVERを実行してプロンプトが返る`);
     });
@@ -829,7 +909,7 @@ async function main() {
       await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
       if (errors.length) console.log('page errors:', errors);
       const verText = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
-      const alive = /FreeDOS|Kernel|Version/i.test(verText);
+      const alive = /FreeCom/i.test(verText);
       results.push({ label: '[walk故障注入] ESCで終了後もDOSコマンド(VER)が正常応答する', ok: alive, actual: alive ? '応答あり' : verText.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} [walk故障注入] ESC終了後にVERを実行してプロンプトが返る`);
     });
@@ -917,7 +997,7 @@ async function main() {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/bgpagebenchdiff.xdf`, 'PROBE_BD', { waitForExit: true }), PORT);
       if (errors.length) console.log('page errors:', errors);
       const text = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
-      const alive = /FreeDOS|Kernel|Version/i.test(text);
+      const alive = /FreeCom/i.test(text);
       results.push({ label: '[bgpage] 差分復帰を大量に使った後もp98_quit()後にDOSコマンド(VER)が正常応答する', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} [bgpage] 差分復帰使用後、p98_quit後にVERを実行してプロンプトが返る`);
     });
@@ -927,7 +1007,7 @@ async function main() {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/key.xdf`, 'PROBE_KE', { waitForExit: true }), PORT);
       if (errors.length) console.log('page errors:', errors);
       const text = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
-      const alive = /FreeDOS|Kernel|Version/i.test(text);
+      const alive = /FreeCom/i.test(text);
       results.push({ label: 'p98_quit後、DOSコマンド(VER)を実行してプロンプトが返る(ハングしていない。BIOSのキーバッファを空にしていることも間接的に確認)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} p98_quit後にVERを実行してプロンプトが返る`);
     });
@@ -947,7 +1027,7 @@ async function main() {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spritebenchegc.xdf`, 'PROBE_SE', { waitForExit: true }), PORT);
       if (errors.length) console.log('page errors:', errors);
       const text = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
-      const alive = /FreeDOS|Kernel|Version/i.test(text);
+      const alive = /FreeCom/i.test(text);
       results.push({ label: 'EGC使用後もp98_quit()後にDOSコマンド(VER)が正常応答する(画面・テキスト表示が壊れていない)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} EGC使用後、p98_quit後にVERを実行してプロンプトが返る`);
     });
@@ -1123,12 +1203,12 @@ async function main() {
       await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
       if (errors.length) console.log('page errors:', errors);
       const verText = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
-      const alive = /FreeDOS|Kernel|Version/i.test(verText);
+      const alive = /FreeCom/i.test(verText);
       results.push({ label: '[walk2] ESCで終了後、DOSコマンド(VER)が正常応答する', ok: alive, actual: alive ? '応答あり' : verText.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} [walk2] ESC終了後にVERを実行してプロンプトが返る`);
     });
 
-    console.log('\n--- walk2: タイル背景でのA/B速度比較(全描き直し vs 差分復帰、BENCH_FRAMES=20) ---');
+    console.log('\n--- walk2: タイル背景でのA/B速度比較(全描き直し vs 差分復帰、BENCH_FRAMES=40) ---');
     {
       // measureRunTimes(上の「スプライト速度のA/B比較」節で定義した共通関数)は
       // 呼び出しごとに新しいpage(withPage)を開いてbootする。同じpageを
@@ -1136,21 +1216,27 @@ async function main() {
       // ことが分かったため(walk2の速度比較を最初に書いた版はこれで落ちた)、
       // ここでも同じ関数を使い回す。
       //
-      // BENCH_FRAMESはbgpage系の300ではなく20にしてある。タイル背景は
+      // BENCH_FRAMESはbgpage系の300ではなく40にしてある。タイル背景は
       // 40x25=1000枚をp98_draw_sprite()で毎フレーム敷き詰め直す必要があり
       // (bgpage系のp98_fill_rect40個より1体あたりのコストが高いCPU合成
       // スプライトを1000回呼ぶため)、実測でスプライト1体あたり約3.8ms
       // (前節のCPU経路約266体/秒)から見積もると300フレームでは
       // 1000*3.8ms*300 ≈ 19分かかってしまい非現実的だった(実際に最初は
       // 300のままデフォルトタイムアウト15秒で試して"DOSプロンプトを待機中に
-      // タイムアウト"を起こした)。20フレームなら全描き直し版でも1分強で
-      // 収まる。
+      // タイムアウト"を起こした)。20フレームまで落として一度は動いたが、
+      // 差分復帰側の signal(20フレームぶんの実コスト、数百ms)が固定
+      // オーバーヘッド(背景を2回描く、約5.3秒)に対して小さすぎて、
+      // 3回測定の中央値でもホストの揺らぎで「差分復帰の方が全描き直しより
+      // 遅い(diff<0)」という逆転結果が出ることがあった(実測で確認)。
+      // 40フレームに増やしてsignalを倍にし、この逆転が起きにくくした
+      // (それでも原理的にはノイズで再度逆転しうる。定性的な結論だけを
+      // 採る方針は他のA/B比較と同じ)。
       const base0 = await measureRunTimes('spritebench0', 'PROBE_S0');
       const baseBg0 = await measureRunTimes('walk2bench0bg', 'PROBE_W3');
-      const fullMs = await measureRunTimes('walk2benchfull', 'PROBE_W1', 150000);
+      const fullMs = await measureRunTimes('walk2benchfull', 'PROBE_W1', 200000);
       const diffMs = await measureRunTimes('walk2benchdiff', 'PROBE_W2', 40000);
 
-      const BENCH_FRAMES = 20;
+      const BENCH_FRAMES = 40;
       const fullPerFrameMs = (fullMs - base0) / BENCH_FRAMES;
       const diffPerFrameMs = (diffMs - baseBg0) / BENCH_FRAMES;
       const fullFps = 1000 / fullPerFrameMs;

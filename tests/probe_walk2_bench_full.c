@@ -13,7 +13,7 @@
 #define TILE_COLS (SCREEN_W / TILE)
 #define TILE_ROWS (SCREEN_H / TILE)
 #define ACCENT_MOD 5
-#define BENCH_FRAMES 20
+#define BENCH_FRAMES 40
 
 static void draw_tiled_background(void) {
     int tx, ty;
