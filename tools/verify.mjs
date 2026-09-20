@@ -234,6 +234,7 @@ async function main() {
     walk2AssetsExe, walk2AssetsBrokenExe, walk2Exe,
     walk2BenchFullExe, walk2BenchDiffExe, walk2Bench0BgExe,
     stateCursorBrokenExe, cursorExe, cursorBrokenExe,
+    fkeyExe, fkeyBrokenExe,
   ] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
@@ -265,6 +266,8 @@ async function main() {
     buildOrThrow('tests/probe_state.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_cursor_noshow.c') }),
     buildOrThrow('tests/probe_cursor.c'),
     buildOrThrow('tests/probe_cursor.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_cursor_noshow.c') }),
+    buildOrThrow('tests/probe_fkey.c'),
+    buildOrThrow('tests/probe_fkey.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_fkey_noshow.c') }),
   ]);
   console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_state(故障注入=カーソル復帰無し)');
 
@@ -296,6 +299,8 @@ async function main() {
     statecursorbroken: programFdFor(stateCursorBrokenExe, 'PROBE_ST'),
     cursor: programFdFor(cursorExe, 'PROBE_CU'),
     cursorbroken: programFdFor(cursorBrokenExe, 'PROBE_CU'),
+    fkey: programFdFor(fkeyExe, 'PROBE_FK'),
+    fkeybroken: programFdFor(fkeyBrokenExe, 'PROBE_FK'),
     walk2benchfull: programFdFor(walk2BenchFullExe, 'PROBE_W1'),
     walk2benchdiff: programFdFor(walk2BenchDiffExe, 'PROBE_W2'),
     walk2bench0bg: programFdFor(walk2Bench0BgExe, 'PROBE_W3'),
@@ -461,6 +466,67 @@ async function main() {
       results.push({ label: '[カーソル復帰故障注入] カーソル復帰を外すとp98_quit()直後もcursor===nullのまま(検出できる)', ok: detected, actual: JSON.stringify(cursor), expected: 'null' });
       console.log(`${detected ? 'OK  ' : 'FAIL'} [カーソル復帰故障注入] 復帰忘れを検出 actual=${JSON.stringify(cursor)}`);
       if (errors.length) console.log('page errors(cursorbroken):', errors);
+    });
+
+    // ファンクションキー行(テキスト画面24行目)。docs/design.md「ファンクション
+    // キー行を消す」節参照。ESC[>1h(消す)/ESC[>1l(戻す)を実測した結果、
+    // 文字コード面・属性面とも1バイトも違わず戻ることが分かったため、期待値は
+    // 実測したそのままのバイト列を使う(col5..15、24行目)。
+    // 文字コード面は1セル2バイト(下位=文字コード、上位=0)なので、
+    // readMemoryで読んだ生バイト列を1つ置きに間引いて比較する。
+    function deinterleaveLow(bytes) {
+      const low = [];
+      for (let i = 0; i < bytes.length; i += 2) low.push(bytes[i]);
+      return low;
+    }
+    const FKEY_ROW = 24, FKEY_COL0 = 5, FKEY_COLS = 11;
+    const FKEY_CHAR_ADDR = 0xA0000 + FKEY_ROW * 160 + FKEY_COL0 * 2;
+    const FKEY_ATTR_ADDR = 0xA2000 + FKEY_ROW * 160 + FKEY_COL0 * 2;
+    const FKEY_HIDDEN_CHAR = Array(FKEY_COLS).fill(0x20);
+    const FKEY_HIDDEN_ATTR = Array(FKEY_COLS).fill(0xE1);
+    // 実測(tools/_debug_fkey相当の使い捨てプローブ、コミットには残していない)
+    // で確認した、消す前(=戻った後にあるべき)の実際の文字・属性列。
+    const FKEY_SHOWN_CHAR = [0x20, 0x43, 0x31, 0x20, 0x20, 0x20, 0x20, 0x20, 0x43, 0x55, 0x20]; /* " C1     CU " */
+    const FKEY_SHOWN_ATTR = [0xE5, 0xE5, 0xE5, 0xE5, 0xE5, 0xE1, 0xE5, 0xE5, 0xE5, 0xE5, 0xE5];
+
+    console.log('\n--- ファンクションキー行(probe_fkey.c: p98_init中は非表示、p98_quit後に元の文字・属性が1バイトも違わず戻る) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/fkey.xdf`), PORT);
+      await page.evaluate(() => window.p98probe.runNoWait('PROBE_FK'));
+
+      // 1) init中(最初の60フレーム=約1秒の静止区間)に読む。500ms待てば
+      //    この区間の中に収まるはず(probe_fkey.cのコメント参照)。
+      await sleep(500);
+      const hiddenChar = deinterleaveLow(await page.evaluate((a, l) => window.p98probe.readMemory(a, l), FKEY_CHAR_ADDR, FKEY_COLS * 2));
+      const hiddenAttr = deinterleaveLow(await page.evaluate((a, l) => window.p98probe.readMemory(a, l), FKEY_ATTR_ADDR, FKEY_COLS * 2));
+      assertEqual('[fkey] p98_init中はファンクションキー行が空白(文字コード面)', hiddenChar, FKEY_HIDDEN_CHAR, results);
+      assertEqual('[fkey] p98_init中はファンクションキー行の属性がE1(下線が消えている)', hiddenAttr, FKEY_HIDDEN_ATTR, results);
+
+      // 2) p98_quit()後、COMMAND.COMへ戻る前の静止区間(120フレーム=約2秒)の
+      //    中で読む。起動からの累積で2.2秒待つ(1)の500msに追加で1.7秒)。
+      await sleep(1700);
+      const shownChar = deinterleaveLow(await page.evaluate((a, l) => window.p98probe.readMemory(a, l), FKEY_CHAR_ADDR, FKEY_COLS * 2));
+      const shownAttr = deinterleaveLow(await page.evaluate((a, l) => window.p98probe.readMemory(a, l), FKEY_ATTR_ADDR, FKEY_COLS * 2));
+      assertEqual('【主目的】[fkey] p98_quit()後はファンクションキー行の文字が1バイトも違わず元に戻る', shownChar, FKEY_SHOWN_CHAR, results);
+      assertEqual('【主目的】[fkey] p98_quit()後はファンクションキー行の属性(下線パターン含む)も1バイトも違わず元に戻る', shownAttr, FKEY_SHOWN_ATTR, results);
+      if (errors.length) console.log('page errors(fkey):', errors);
+    });
+
+    console.log('\n--- 故障注入: probe_fkey(p98_broken_fkey_noshow版)はp98_quit()後もファンクションキー行が非表示のままのはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/fkeybroken.xdf`), PORT);
+      await page.evaluate(() => window.p98probe.runNoWait('PROBE_FK'));
+      await sleep(2200);
+      const shownChar = deinterleaveLow(await page.evaluate((a, l) => window.p98probe.readMemory(a, l), FKEY_CHAR_ADDR, FKEY_COLS * 2));
+      const detected = JSON.stringify(shownChar) !== JSON.stringify(FKEY_SHOWN_CHAR);
+      results.push({
+        label: '[fkey故障注入] ファンクションキー行の復帰を外すとp98_quit()後も文字が戻らない(検出できる)',
+        ok: detected, actual: JSON.stringify(shownChar), expected: `not ${JSON.stringify(FKEY_SHOWN_CHAR)}`,
+      });
+      console.log(`${detected ? 'OK  ' : 'FAIL'} [fkey故障注入] 復帰忘れを検出 actual=${JSON.stringify(shownChar)}`);
+      if (errors.length) console.log('page errors(fkeybroken):', errors);
     });
 
     console.log('\n--- キーボード (probe_key: down/pressed/release/複数同時/getch/長押しリピート耐性) ---');

@@ -1,4 +1,11 @@
 /*
+ * ★故障注入版(tests/p98_broken_fkey_noshow.c)★
+ * src/p98.c のコピーに対し、p98_quit()でファンクションキー行を表示に
+ * 戻す呼び出し(p98__show_fkey_line())を削除してある。docs/verify-log.mdの
+ * 陰性対照(「p98_quit()後にファンクションキー行が元に戻っている」検査自体が、
+ * 戻し忘れをFAILとして検出できることの確認)専用。通常のビルド・配布物には
+ * 含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -479,7 +486,8 @@ void p98_quit(void) {
      * waitForCurrentDosPromptが永久にタイムアウトする」と予想したが、
      * 実測で外れた。docs/design.md参照)。 */
     p98__int18_ah(0x11);
-    p98__show_fkey_line();
+    /* ★故障注入: 本来はここで p98__show_fkey_line() を呼んでファンクション
+     * キー行を表示に戻すはずだが、意図的に削除してある(コメントのみ残す)。 */
 
     for (i = 0; i < 16; i++) {
         p98__outb(P98_PORT_PAL_INDEX, (unsigned char)i);
