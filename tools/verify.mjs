@@ -194,6 +194,7 @@ async function main() {
   const [
     fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe,
     spriteExe, spriteNoMaskExe, spriteNoClipExe, spriteBenchExe, spriteBench0Exe,
+    spriteEgcExe, spriteEgcBrokenExe, spriteBenchEgcExe,
   ] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
@@ -206,8 +207,11 @@ async function main() {
     buildOrThrow('tests/probe_sprite.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_spritenoclip.c') }),
     buildOrThrow('tests/probe_sprite_bench.c'),
     buildOrThrow('tests/probe_sprite_bench0.c'),
+    buildOrThrow('tests/probe_sprite_egc.c'),
+    buildOrThrow('tests/probe_sprite_egc.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_egc_noplane.c') }),
+    buildOrThrow('tests/probe_sprite_bench_egc.c'),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -221,6 +225,9 @@ async function main() {
     spritenoclip: programFdFor(spriteNoClipExe, 'PROBE_SP'),
     spritebench: programFdFor(spriteBenchExe, 'PROBE_SB'),
     spritebench0: programFdFor(spriteBench0Exe, 'PROBE_S0'),
+    spriteegc: programFdFor(spriteEgcExe, 'PROBE_SP'),
+    spriteegcbroken: programFdFor(spriteEgcBrokenExe, 'PROBE_SP'),
+    spritebenchegc: programFdFor(spriteBenchEgcExe, 'PROBE_SE'),
   };
 
   const server = await startServer(programFds);
@@ -400,12 +407,11 @@ async function main() {
       console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(差分無し) PRESSLONG actual=${pressLong}`);
     });
 
-    console.log('\n--- スプライト (probe_sprite: シフト/色+マスク/重ね描き/クリップ) ---');
-    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
-      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/sprite.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
-      if (errors.length) console.log('page errors:', errors);
-      const read = (addr, len) => page.evaluate((a, l) => window.p98probe.readMemory(a, l), addr, len);
-
+    // probe_sprite.c(CPU経路)とprobe_sprite_egc.c(EGC経路)は、座標・
+    // スプライトデータが完全に同一。この同じ関数で両方を検査することで、
+    // 「絶対値として正しいこと」と「CPU経路とEGC経路が一致すること(等価性)」
+    // を同時に確認する。
+    async function checkSpriteScenario(read, results, tag) {
       // 1) 横1ドットシフト(shift=0..7)。x=104+i, y=10+i。destバイトは13(と、shift!=0なら14)。
       //   期待値は 0xFF>>shift / (0xFF<<(8-shift))&0xFF の手計算。
       const shiftExpect = [
@@ -416,28 +422,28 @@ async function main() {
         const rowOff = (10 + s) * ROW;
         const mem = await read(PLANE.B + rowOff + 13, 2);
         const [b13, b14] = shiftExpect[s];
-        assertEqual(`シフトshift=${s}: byte13`, [mem[0]], [b13], results);
+        assertEqual(`${tag} シフトshift=${s}: byte13`, [mem[0]], [b13], results);
         if (b14 === null) {
-          assertEqual(`シフトshift=${s}: byte14は未書き込み(destByteCount=1)`, [mem[1]], [0x00], results);
+          assertEqual(`${tag} シフトshift=${s}: byte14は未書き込み(destByteCount=1)`, [mem[1]], [0x00], results);
         } else {
-          assertEqual(`シフトshift=${s}: byte14`, [mem[1]], [b14], results);
+          assertEqual(`${tag} シフトshift=${s}: byte14`, [mem[1]], [b14], results);
         }
       }
       // shift=3のケースだけ4プレーンとも同じ値になっていることも確認(全プレーン配線の確認)。
       for (const plane of ['B', 'R', 'G', 'I']) {
         const mem = await read(PLANE[plane] + (10 + 3) * ROW + 13, 2);
-        assertEqual(`シフトshift=3 ${plane}plane byte13,14`, mem, [0x1F, 0xE0], results);
+        assertEqual(`${tag} シフトshift=3 ${plane}plane byte13,14`, mem, [0x1F, 0xE0], results);
       }
 
       // 2) 複数色+マスク(x=200,y=50)。row0(y=50)はB/R=0xFB,0xC0、G/I=0,0。
       const row0Off = 50 * ROW;
-      assertEqual('スプライトrow0 Bplane byte25,26', await read(PLANE.B + row0Off + 25, 2), [0xFB, 0xC0], results);
-      assertEqual('スプライトrow0 Rplane byte25,26', await read(PLANE.R + row0Off + 25, 2), [0xFB, 0xC0], results);
-      assertEqual('スプライトrow0 Gplane byte25,26(色に緑成分は無い)', await read(PLANE.G + row0Off + 25, 2), [0x00, 0x00], results);
+      assertEqual(`${tag} スプライトrow0 Bplane byte25,26`, await read(PLANE.B + row0Off + 25, 2), [0xFB, 0xC0], results);
+      assertEqual(`${tag} スプライトrow0 Rplane byte25,26`, await read(PLANE.R + row0Off + 25, 2), [0xFB, 0xC0], results);
+      assertEqual(`${tag} スプライトrow0 Gplane byte25,26(色に緑成分は無い)`, await read(PLANE.G + row0Off + 25, 2), [0x00, 0x00], results);
       // row1(y=51)は色12(緑+輝度)で全10ドット不透明: G/I=0xFF,0xC0、B/R=0,0。
       const row1Off = 51 * ROW;
-      assertEqual('スプライトrow1 Gplane byte25,26', await read(PLANE.G + row1Off + 25, 2), [0xFF, 0xC0], results);
-      assertEqual('スプライトrow1 Bplane byte25,26(色に青成分は無い)', await read(PLANE.B + row1Off + 25, 2), [0x00, 0x00], results);
+      assertEqual(`${tag} スプライトrow1 Gplane byte25,26`, await read(PLANE.G + row1Off + 25, 2), [0xFF, 0xC0], results);
+      assertEqual(`${tag} スプライトrow1 Bplane byte25,26(色に青成分は無い)`, await read(PLANE.B + row1Off + 25, 2), [0x00, 0x00], results);
 
       // 3) 重ね描き: fill_rect(色5=青+緑)の上にrow0(マスクの穴=col5)を描く。
       //    手計算(docs/verify-log.md): 穴(byte25のbit2)では矩形の色が残るはず。
@@ -445,38 +451,71 @@ async function main() {
       //    ではなく0xFBになるはず、というのが故障注入との違い)。
       //    G[25]=0x04(矩形のG=1が穴だけ残り、他はスプライトのG=0で上書きされ0になる)。
       const row0OverlapOff = 60 * ROW;
-      assertEqual('重ね描き: Bplane byte25(穴でB=1が残る)', await read(PLANE.B + row0OverlapOff + 25, 1), [0xFF], results);
-      assertEqual('重ね描き: Gplane byte25(穴でG=1が残り、他は0で上書き)', await read(PLANE.G + row0OverlapOff + 25, 1), [0x04], results);
-      assertEqual('重ね描き: Bplane byte26(穴が無い列は矩形と同じ0xC0)', await read(PLANE.B + row0OverlapOff + 26, 1), [0xC0], results);
+      assertEqual(`${tag} 重ね描き: Bplane byte25(穴でB=1が残る)`, await read(PLANE.B + row0OverlapOff + 25, 1), [0xFF], results);
+      assertEqual(`${tag} 重ね描き: Gplane byte25(穴でG=1が残り、他は0で上書き)`, await read(PLANE.G + row0OverlapOff + 25, 1), [0x04], results);
+      assertEqual(`${tag} 重ね描き: Bplane byte26(穴が無い列は矩形と同じ0xC0)`, await read(PLANE.B + row0OverlapOff + 26, 1), [0xC0], results);
 
       // 4) 画面端・四隅のクリップ(8x4白ベタ、B/R/G/I全プレーン同一パターン)
       // 左端 x=-3,y=200: 可視5px -> 0xF8。次のバイト(cols8-15)は触っていないはず。
       let r = await read(PLANE.B + 200 * ROW + 0, 2);
-      assertEqual('左端クリップ: byte0=0xF8、byte1は未書き込み', r, [0xF8, 0x00], results);
+      assertEqual(`${tag} 左端クリップ: byte0=0xF8、byte1は未書き込み`, r, [0xF8, 0x00], results);
       // 右端 x=635,y=210: byte79=0x1F。次の行(211)のbyte0は触っていないはず(横クリップの検査を兼ねる)。
       r = await read(PLANE.B + 210 * ROW + 79, 1);
-      assertEqual('右端クリップ: byte79=0x1F', r, [0x1F], results);
+      assertEqual(`${tag} 右端クリップ: byte79=0x1F`, r, [0x1F], results);
       r = await read(PLANE.B + 211 * ROW + 0, 1);
-      assertEqual('右端クリップ: 次行(211)の先頭バイトは触られていない', r, [0x00], results);
+      assertEqual(`${tag} 右端クリップ: 次行(211)の先頭バイトは触られていない`, r, [0x00], results);
       // 上端 x=300,y=-2: 4行中、上2行はクリップされ可視2行(y=0,1)のみ。x=300はshift=4。
       r = await read(PLANE.B + 0 * ROW + 37, 2);
-      assertEqual('上端クリップ: row0 byte37,38=0x0F,0xF0', r, [0x0F, 0xF0], results);
+      assertEqual(`${tag} 上端クリップ: row0 byte37,38=0x0F,0xF0`, r, [0x0F, 0xF0], results);
       r = await read(PLANE.B + 1 * ROW + 37, 2);
-      assertEqual('上端クリップ: row1 byte37,38=0x0F,0xF0', r, [0x0F, 0xF0], results);
+      assertEqual(`${tag} 上端クリップ: row1 byte37,38=0x0F,0xF0`, r, [0x0F, 0xF0], results);
       // 下端 x=310,y=398: 可視2行(398,399)のみ。x=310はshift=6。
       r = await read(PLANE.B + 398 * ROW + 38, 2);
-      assertEqual('下端クリップ: row398 byte38,39=0x03,0xFC', r, [0x03, 0xFC], results);
+      assertEqual(`${tag} 下端クリップ: row398 byte38,39=0x03,0xFC`, r, [0x03, 0xFC], results);
       r = await read(PLANE.B + 399 * ROW + 38, 2);
-      assertEqual('下端クリップ: row399 byte38,39=0x03,0xFC', r, [0x03, 0xFC], results);
+      assertEqual(`${tag} 下端クリップ: row399 byte38,39=0x03,0xFC`, r, [0x03, 0xFC], results);
       // 四隅(各コーナーの可視行1本ずつ、既出のx方向の計算を再利用)
       r = await read(PLANE.B + 0 * ROW + 0, 1);
-      assertEqual('左上コーナー: row0 byte0=0xF8', r, [0xF8], results);
+      assertEqual(`${tag} 左上コーナー: row0 byte0=0xF8`, r, [0xF8], results);
       r = await read(PLANE.B + 0 * ROW + 79, 1);
-      assertEqual('右上コーナー: row0 byte79=0x1F', r, [0x1F], results);
+      assertEqual(`${tag} 右上コーナー: row0 byte79=0x1F`, r, [0x1F], results);
       r = await read(PLANE.B + 399 * ROW + 0, 1);
-      assertEqual('左下コーナー: row399 byte0=0xF8', r, [0xF8], results);
+      assertEqual(`${tag} 左下コーナー: row399 byte0=0xF8`, r, [0xF8], results);
       r = await read(PLANE.B + 399 * ROW + 79, 1);
-      assertEqual('右下コーナー: row399 byte79=0x1F', r, [0x1F], results);
+      assertEqual(`${tag} 右下コーナー: row399 byte79=0x1F`, r, [0x1F], results);
+    }
+
+    console.log('\n--- スプライト・CPU経路 (probe_sprite: シフト/色+マスク/重ね描き/クリップ) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/sprite.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      const read = (addr, len) => page.evaluate((a, l) => window.p98probe.readMemory(a, l), addr, len);
+      await checkSpriteScenario(read, results, '[CPU]');
+    });
+
+    console.log('\n--- スプライト・EGC経路 (probe_sprite_egc: CPU経路と全く同じ座標・期待値で検証=等価性の確認) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spriteegc.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      const read = (addr, len) => page.evaluate((a, l) => window.p98probe.readMemory(a, l), addr, len);
+      await checkSpriteScenario(read, results, '[EGC]');
+    });
+
+    console.log('\n--- 故障注入: probe_sprite_egc(WMレジスタ誤り版)はFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spriteegcbroken.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      // シフトshift=0(x=104,y=10)は単色・全面不透明なのでEGC経路(fast path)が
+      // 必ず通る。WM(0x4A4)を0x0000(CPU値そのまま)から0x1000(パターンを
+      // 書く)へ誤らせると、CPU側で計算したソフトウェアシフト済みの値
+      // (0xFF)ではなく別の値が書かれるはずで、期待値0xFFと一致しなくなる。
+      // (0x4A0(プレーン選択)を壊す形も試したが、np2kaiのこのEGC実装では
+      // 値に関わらず常に4プレーンぶん書かれてしまい検出できなかったため、
+      // WMを壊す形にした。docs/verify-log.md参照。)
+      const mem = await page.evaluate((a, l) => window.p98probe.readMemory(a, l), PLANE.B + 10 * ROW + 13, 1);
+      const brokenDetected = mem[0] !== 0xFF;
+      results.push({ label: '故障注入(EGC WMレジスタ誤り)はシフトshift=0のBplane byte13が0xFFにならない', ok: brokenDetected, actual: mem, expected: 'not [ff]' });
+      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(EGC WMレジスタ誤り) Bplane byte13 actual=[${bytesToHex(mem)}] (正常なら0xFFのはず)`);
     });
 
     console.log('\n--- 故障注入: probe_sprite(マスク無し版)はFAILするはず ---');
@@ -500,43 +539,50 @@ async function main() {
       console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(クリップ無し)は次行の先頭バイトを汚す actual=[${bytesToHex(mem)}]`);
     });
 
-    console.log('\n--- スプライト速度の基準取り (probe_sprite_bench / probe_sprite_bench0) ---');
+    console.log('\n--- スプライト速度のA/B比較 (probe_sprite_bench[_egc] / probe_sprite_bench0) ---');
     // ゲスト側のBIOSティック(INT1Ah)は実時間と安定して対応しないことが実測で
     // 分かった(tests/probe_sprite_bench.cのコメント参照)ため、ホスト
     // (puppeteer)側のperformance.now()で「B:からPROBE_S*を実行してプロンプトへ
-    // 戻るまで」の実時間を測り、スプライトN本描く版(bench)と0本の版(bench0)の
-    // 差分を取ることで、init/quit等の固定オーバーヘッドを相殺した
-    // 「N本ぶんの描画にかかった時間」を求める。ノイズを減らすため3回ずつ測り
-    // 中央値を使う。
-    const SPRITE_BENCH_N = 40 * 50; // tests/probe_sprite_bench.c の BENCH_N*BENCH_ITERS と一致させる
+    // 戻るまで」の実時間を測り、スプライトN本描く版(CPU経路/EGC経路)と
+    // 0本の版(bench0、共通ベースライン)の差分を取ることで、init/quit等の
+    // 固定オーバーヘッドを相殺した「N本ぶんの描画にかかった時間」を求める。
+    // ノイズを減らすため3回ずつ測り中央値を使う。
+    // 条件はCPU版・EGC版・ベースラインの3本とも完全に同一:
+    //   スプライト16x16(全プレーン0xFF・マスク0xFFの最悪ケース)、
+    //   本数2000(=BENCH_N 40 × BENCH_ITERS 50)、同じ座標列、同じ測定方法。
+    const SPRITE_BENCH_N = 40 * 50; // tests/probe_sprite_bench*.c の BENCH_N*BENCH_ITERS と一致させる
     const median = (arr) => { const s = [...arr].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
-    let baseTimes = [];
-    let withTimes = [];
-    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
-      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/spritebench0.xdf`), PORT);
-      for (let i = 0; i < 3; i++) baseTimes.push(await page.evaluate(() => window.p98probe.runTimed('PROBE_S0', 15000)));
-      if (errors.length) console.log('page errors(bench0):', errors);
-      console.log(`baseline(0本描画)の実行時間: [${baseTimes.map((v) => v.toFixed(0)).join(', ')}]ms`);
-    });
-    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
-      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/spritebench.xdf`), PORT);
-      for (let i = 0; i < 3; i++) withTimes.push(await page.evaluate(() => window.p98probe.runTimed('PROBE_SB', 15000)));
-      if (errors.length) console.log('page errors(bench):', errors);
-      console.log(`${SPRITE_BENCH_N}本描画の実行時間: [${withTimes.map((v) => v.toFixed(0)).join(', ')}]ms`);
-    });
-    {
-      const baseMs = median(baseTimes);
-      const withMs = median(withTimes);
-      const perSpriteMs = (withMs - baseMs) / SPRITE_BENCH_N;
-      const spritesPerSecond = perSpriteMs > 0 ? 1000 / perSpriteMs : Infinity;
-      console.log(`中央値: baseline=${baseMs.toFixed(0)}ms, ${SPRITE_BENCH_N}本描画=${withMs.toFixed(0)}ms => 差分${(withMs - baseMs).toFixed(0)}ms`);
-      console.log(`1体あたり約${perSpriteMs.toFixed(3)}ms ≈ 約${spritesPerSecond.toFixed(0)}体/秒(このnp2kai実装上の相対値。実機のfpsではない)`);
-      const ok = Number.isFinite(perSpriteMs) && perSpriteMs > 0;
-      results.push({
-        label: 'スプライト速度の基準取りが完了(具体的な数値は合否判定の対象ではない。docs/verify-log.md参照)',
-        ok, actual: `約${spritesPerSecond.toFixed(0)}体/秒相当`, expected: '正の値が計測できていること',
+    async function measureRunTimes(program, stem) {
+      const times = [];
+      await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+        await page.evaluate((port, prog) => window.p98probe.boot(`http://127.0.0.1:${port}/program/${prog}.xdf`), PORT, program);
+        for (let i = 0; i < 3; i++) times.push(await page.evaluate((s) => window.p98probe.runTimed(s, 15000), stem));
+        if (errors.length) console.log(`page errors(${program}):`, errors);
       });
-      console.log(ok ? 'OK   スプライト速度の基準取りが完了' : 'FAIL スプライト速度の基準取りに失敗(差分が0以下)');
+      console.log(`${program}の実行時間: [${times.map((v) => v.toFixed(0)).join(', ')}]ms`);
+      return median(times);
+    }
+
+    const baseMs = await measureRunTimes('spritebench0', 'PROBE_S0');
+    const cpuMs = await measureRunTimes('spritebench', 'PROBE_SB');
+    const egcMs = await measureRunTimes('spritebenchegc', 'PROBE_SE');
+
+    {
+      const cpuPerSpriteMs = (cpuMs - baseMs) / SPRITE_BENCH_N;
+      const egcPerSpriteMs = (egcMs - baseMs) / SPRITE_BENCH_N;
+      const cpuPerSec = cpuPerSpriteMs > 0 ? 1000 / cpuPerSpriteMs : Infinity;
+      const egcPerSec = egcPerSpriteMs > 0 ? 1000 / egcPerSpriteMs : Infinity;
+      console.log(`中央値: baseline=${baseMs.toFixed(0)}ms, CPU経路${SPRITE_BENCH_N}本=${cpuMs.toFixed(0)}ms, EGC経路${SPRITE_BENCH_N}本=${egcMs.toFixed(0)}ms`);
+      console.log(`CPU経路: 1体あたり約${cpuPerSpriteMs.toFixed(3)}ms ≈ 約${cpuPerSec.toFixed(0)}体/秒`);
+      console.log(`EGC経路: 1体あたり約${egcPerSpriteMs.toFixed(3)}ms ≈ 約${egcPerSec.toFixed(0)}体/秒`);
+      console.log(`比(EGC/CPU): ${(egcPerSec / cpuPerSec).toFixed(2)}倍`);
+      console.log('注意: これはnp2kai(WebNP2)のEGCエミュレーション実装+puppeteerというこの実行環境全体を通した相対値であり、実機での比率とは限らない(エミュレータがEGCを実機より速く/遅く実装している可能性があるため)。定性的な結論(速い/変わらない/遅い)のみ採る。');
+      const ok = Number.isFinite(cpuPerSpriteMs) && cpuPerSpriteMs > 0 && Number.isFinite(egcPerSpriteMs) && egcPerSpriteMs > 0;
+      results.push({
+        label: 'スプライト速度のA/B比較が完了(具体的な数値・比率は合否判定の対象ではない。docs/verify-log.md参照)',
+        ok, actual: `CPU約${cpuPerSec.toFixed(0)}体/秒, EGC約${egcPerSec.toFixed(0)}体/秒`, expected: '両方とも正の値が計測できていること',
+      });
+      console.log(ok ? 'OK   スプライト速度のA/B比較が完了' : 'FAIL スプライト速度のA/B比較に失敗(差分が0以下)');
     }
 
     console.log('\n--- p98_quit後もDOSが生きている(コマンドを1つ実行してプロンプトが返る) ---');
@@ -547,6 +593,26 @@ async function main() {
       const alive = /FreeDOS|Kernel|Version/i.test(text);
       results.push({ label: 'p98_quit後、DOSコマンド(VER)を実行してプロンプトが返る(ハングしていない。BIOSのキーバッファを空にしていることも間接的に確認)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} p98_quit後にVERを実行してプロンプトが返る`);
+    });
+
+    console.log('\n--- EGC使用後の後始末(テキスト表示・DOS続行への影響が無いこと) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      // probe_sprite_bench_egc.c はEGCを何度も有効化/無効化しながら
+      // 2000回描画したあと p98_quit() で正常に抜ける(probe_sprite_egc.cは
+      // VRAM読み取り用に無限ループへ入って戻らないため、ここでは使えない)。
+      // p98_quit()自体も念のため0x7Cを無効化する(src/p98.c参照)。
+      // EGCを使った直後でも、
+      //  (a) p98_quit()後にDOSプロンプトへ戻り、コマンドを実行できる
+      //      (=画面がグラフィック/EGCのままハングしていない)
+      //  (b) VERコマンドの出力がテキストとして正しく読める
+      //      (=テキストVRAMがEGC/GRCGの影響で化けていない)
+      // ことを確認する。
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spritebenchegc.xdf`, 'PROBE_SE', { waitForExit: true }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      const text = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
+      const alive = /FreeDOS|Kernel|Version/i.test(text);
+      results.push({ label: 'EGC使用後もp98_quit()後にDOSコマンド(VER)が正常応答する(画面・テキスト表示が壊れていない)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
+      console.log(`${alive ? 'OK  ' : 'FAIL'} EGC使用後、p98_quit後にVERを実行してプロンプトが返る`);
     });
   } finally {
     await browser.close();

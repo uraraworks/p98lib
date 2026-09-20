@@ -40,6 +40,7 @@ int main(void) {
     p98_init();
     p98_flip();
     p98_clear(0);
+    p98_set_sprite_backend(P98_SPRITE_CPU); /* 既定はCPUだが明示しておく */
 
     for (iter = 0; iter < BENCH_ITERS; iter++) {
         for (i = 0; i < BENCH_N; i++) {

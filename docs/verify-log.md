@@ -6,10 +6,9 @@ WebNP2(NP2kai) + FreeDOS(98) を puppeteer で操作し、実際にビルドし�
 **ゲスト自身がメモリを読んで報告したテキスト**で結果を確認する。
 枠組みは `WorkbenchNP2/ide/verify-huge-model.mjs` を参考にした。
 
-最終実行結果: **70/70 OK**(2026-09-20、実行ログは下記。スプライト
-[`p98_draw_sprite()`]追加後の結果。旧結果は28/28で、内訳は矩形塗り+クリップ
-9件・ページ入替3件・故障注入(クリップ無し)1件・状態退避復元4件・キーボード
-9件・故障注入(差分無し)1件・DOS生存確認1件)。
+最終実行結果: **111/111 OK**(2026-09-20、実行ログは下記。EGCスプライト
+経路[`p98_draw_sprite_ex(..., P98_SPRITE_EGC)`]追加後の結果。直前の結果は
+70/70で、スプライト[`p98_draw_sprite()`]追加時点のもの。さらに前は28/28)。
 
 ```
 --- ビルド ---
@@ -57,46 +56,90 @@ OK   p98_key_getchで打った文字列が順番どおり取れる(a,a,b,SHIFT+a
 --- 故障注入: probe_key(p98_poll()で前回との差分を取らない版)は長押しでFAILするはず ---
 OK   故障注入(差分無し) PRESSLONG actual=55
 
---- スプライト (probe_sprite: シフト/色+マスク/重ね描き/クリップ) ---
-OK   シフトshift=0: byte13
-OK   シフトshift=0: byte14は未書き込み(destByteCount=1)
-OK   シフトshift=1: byte13
-OK   シフトshift=1: byte14
-OK   シフトshift=2: byte13
-OK   シフトshift=2: byte14
-OK   シフトshift=3: byte13
-OK   シフトshift=3: byte14
-OK   シフトshift=4: byte13
-OK   シフトshift=4: byte14
-OK   シフトshift=5: byte13
-OK   シフトshift=5: byte14
-OK   シフトshift=6: byte13
-OK   シフトshift=6: byte14
-OK   シフトshift=7: byte13
-OK   シフトshift=7: byte14
-OK   シフトshift=3 Bplane byte13,14
-OK   シフトshift=3 Rplane byte13,14
-OK   シフトshift=3 Gplane byte13,14
-OK   シフトshift=3 Iplane byte13,14
-OK   スプライトrow0 Bplane byte25,26
-OK   スプライトrow0 Rplane byte25,26
-OK   スプライトrow0 Gplane byte25,26(色に緑成分は無い)
-OK   スプライトrow1 Gplane byte25,26
-OK   スプライトrow1 Bplane byte25,26(色に青成分は無い)
-OK   重ね描き: Bplane byte25(穴でB=1が残る)
-OK   重ね描き: Gplane byte25(穴でG=1が残り、他は0で上書き)
-OK   重ね描き: Bplane byte26(穴が無い列は矩形と同じ0xC0)
-OK   左端クリップ: byte0=0xF8、byte1は未書き込み
-OK   右端クリップ: byte79=0x1F
-OK   右端クリップ: 次行(211)の先頭バイトは触られていない
-OK   上端クリップ: row0 byte37,38=0x0F,0xF0
-OK   上端クリップ: row1 byte37,38=0x0F,0xF0
-OK   下端クリップ: row398 byte38,39=0x03,0xFC
-OK   下端クリップ: row399 byte38,39=0x03,0xFC
-OK   左上コーナー: row0 byte0=0xF8
-OK   右上コーナー: row0 byte79=0x1F
-OK   左下コーナー: row399 byte0=0xF8
-OK   右下コーナー: row399 byte79=0x1F
+--- スプライト・CPU経路 (probe_sprite: シフト/色+マスク/重ね描き/クリップ) ---
+OK   [CPU] シフトshift=0: byte13
+OK   [CPU] シフトshift=0: byte14は未書き込み(destByteCount=1)
+OK   [CPU] シフトshift=1: byte13
+OK   [CPU] シフトshift=1: byte14
+OK   [CPU] シフトshift=2: byte13
+OK   [CPU] シフトshift=2: byte14
+OK   [CPU] シフトshift=3: byte13
+OK   [CPU] シフトshift=3: byte14
+OK   [CPU] シフトshift=4: byte13
+OK   [CPU] シフトshift=4: byte14
+OK   [CPU] シフトshift=5: byte13
+OK   [CPU] シフトshift=5: byte14
+OK   [CPU] シフトshift=6: byte13
+OK   [CPU] シフトshift=6: byte14
+OK   [CPU] シフトshift=7: byte13
+OK   [CPU] シフトshift=7: byte14
+OK   [CPU] シフトshift=3 Bplane byte13,14
+OK   [CPU] シフトshift=3 Rplane byte13,14
+OK   [CPU] シフトshift=3 Gplane byte13,14
+OK   [CPU] シフトshift=3 Iplane byte13,14
+OK   [CPU] スプライトrow0 Bplane byte25,26
+OK   [CPU] スプライトrow0 Rplane byte25,26
+OK   [CPU] スプライトrow0 Gplane byte25,26(色に緑成分は無い)
+OK   [CPU] スプライトrow1 Gplane byte25,26
+OK   [CPU] スプライトrow1 Bplane byte25,26(色に青成分は無い)
+OK   [CPU] 重ね描き: Bplane byte25(穴でB=1が残る)
+OK   [CPU] 重ね描き: Gplane byte25(穴でG=1が残り、他は0で上書き)
+OK   [CPU] 重ね描き: Bplane byte26(穴が無い列は矩形と同じ0xC0)
+OK   [CPU] 左端クリップ: byte0=0xF8、byte1は未書き込み
+OK   [CPU] 右端クリップ: byte79=0x1F
+OK   [CPU] 右端クリップ: 次行(211)の先頭バイトは触られていない
+OK   [CPU] 上端クリップ: row0 byte37,38=0x0F,0xF0
+OK   [CPU] 上端クリップ: row1 byte37,38=0x0F,0xF0
+OK   [CPU] 下端クリップ: row398 byte38,39=0x03,0xFC
+OK   [CPU] 下端クリップ: row399 byte38,39=0x03,0xFC
+OK   [CPU] 左上コーナー: row0 byte0=0xF8
+OK   [CPU] 右上コーナー: row0 byte79=0x1F
+OK   [CPU] 左下コーナー: row399 byte0=0xF8
+OK   [CPU] 右下コーナー: row399 byte79=0x1F
+
+--- スプライト・EGC経路 (probe_sprite_egc: CPU経路と全く同じ座標・期待値で検証=等価性の確認) ---
+OK   [EGC] シフトshift=0: byte13
+OK   [EGC] シフトshift=0: byte14は未書き込み(destByteCount=1)
+OK   [EGC] シフトshift=1: byte13
+OK   [EGC] シフトshift=1: byte14
+OK   [EGC] シフトshift=2: byte13
+OK   [EGC] シフトshift=2: byte14
+OK   [EGC] シフトshift=3: byte13
+OK   [EGC] シフトshift=3: byte14
+OK   [EGC] シフトshift=4: byte13
+OK   [EGC] シフトshift=4: byte14
+OK   [EGC] シフトshift=5: byte13
+OK   [EGC] シフトshift=5: byte14
+OK   [EGC] シフトshift=6: byte13
+OK   [EGC] シフトshift=6: byte14
+OK   [EGC] シフトshift=7: byte13
+OK   [EGC] シフトshift=7: byte14
+OK   [EGC] シフトshift=3 Bplane byte13,14
+OK   [EGC] シフトshift=3 Rplane byte13,14
+OK   [EGC] シフトshift=3 Gplane byte13,14
+OK   [EGC] シフトshift=3 Iplane byte13,14
+OK   [EGC] スプライトrow0 Bplane byte25,26
+OK   [EGC] スプライトrow0 Rplane byte25,26
+OK   [EGC] スプライトrow0 Gplane byte25,26(色に緑成分は無い)
+OK   [EGC] スプライトrow1 Gplane byte25,26
+OK   [EGC] スプライトrow1 Bplane byte25,26(色に青成分は無い)
+OK   [EGC] 重ね描き: Bplane byte25(穴でB=1が残る)
+OK   [EGC] 重ね描き: Gplane byte25(穴でG=1が残り、他は0で上書き)
+OK   [EGC] 重ね描き: Bplane byte26(穴が無い列は矩形と同じ0xC0)
+OK   [EGC] 左端クリップ: byte0=0xF8、byte1は未書き込み
+OK   [EGC] 右端クリップ: byte79=0x1F
+OK   [EGC] 右端クリップ: 次行(211)の先頭バイトは触られていない
+OK   [EGC] 上端クリップ: row0 byte37,38=0x0F,0xF0
+OK   [EGC] 上端クリップ: row1 byte37,38=0x0F,0xF0
+OK   [EGC] 下端クリップ: row398 byte38,39=0x03,0xFC
+OK   [EGC] 下端クリップ: row399 byte38,39=0x03,0xFC
+OK   [EGC] 左上コーナー: row0 byte0=0xF8
+OK   [EGC] 右上コーナー: row0 byte79=0x1F
+OK   [EGC] 左下コーナー: row399 byte0=0xF8
+OK   [EGC] 右下コーナー: row399 byte79=0x1F
+
+--- 故障注入: probe_sprite_egc(WMレジスタ誤り版)はFAILするはず ---
+OK   故障注入(EGC WMレジスタ誤り) Bplane byte13 actual=[00] (正常なら0xFFのはず)
 
 --- 故障注入: probe_sprite(マスク無し版)はFAILするはず ---
 OK   故障注入(マスク無し) Gplane byte25 actual=[00] (正常なら0x04のはず)
@@ -104,17 +147,24 @@ OK   故障注入(マスク無し) Gplane byte25 actual=[00] (正常なら0x04�
 --- 故障注入: probe_sprite(クリップ無し版)はFAILするはず ---
 OK   故障注入(クリップ無し)は次行の先頭バイトを汚す actual=[e0]
 
---- スプライト速度の基準取り (probe_sprite_bench / probe_sprite_bench0) ---
-baseline(0本描画)の実行時間: [391, 180, 151]ms
-2000本描画の実行時間: [7618, 6920, 7142]ms
-中央値: baseline=180ms, 2000本描画=7142ms => 差分6962ms
-1体あたり約3.481ms ≈ 約287体/秒(このnp2kai実装上の相対値。実機のfpsではない)
-OK   スプライト速度の基準取りが完了
+--- スプライト速度のA/B比較 (probe_sprite_bench[_egc] / probe_sprite_bench0) ---
+spritebench0の実行時間: [180, 139, 143]ms
+spritebenchの実行時間: [7785, 7597, 7564]ms
+spritebenchegcの実行時間: [8052, 7984, 7990]ms
+中央値: baseline=143ms, CPU経路2000本=7597ms, EGC経路2000本=7990ms
+CPU経路: 1体あたり約3.727ms ≈ 約268体/秒
+EGC経路: 1体あたり約3.923ms ≈ 約255体/秒
+比(EGC/CPU): 0.95倍
+注意: これはnp2kai(WebNP2)のEGCエミュレーション実装+puppeteerというこの実行環境全体を通した相対値であり、実機での比率とは限らない(エミュレータがEGCを実機より速く/遅く実装している可能性があるため)。定性的な結論(速い/変わらない/遅い)のみ採る。
+OK   スプライト速度のA/B比較が完了
 
 --- p98_quit後もDOSが生きている(コマンドを1つ実行してプロンプトが返る) ---
 OK   p98_quit後にVERを実行してプロンプトが返る
 
-=== 70/70 OK ===
+--- EGC使用後の後始末(テキスト表示・DOS続行への影響が無いこと) ---
+OK   EGC使用後、p98_quit後にVERを実行してプロンプトが返る
+
+=== 111/111 OK ===
 ```
 
 (`http404: .../favicon.ico` はテスト用HTMLがfaviconを持たないだけの無害な
@@ -460,6 +510,129 @@ baseline(0本描画)の実行時間: [391, 180, 151]ms (中央値180ms)
   実装したら同じ`tests/probe_sprite_bench.c`(のEGC版)で同じ方式(ホスト側
   performance.now()、baseline差分)で測り直し、比を見る。
 
+## 8. EGCによるスプライト高速化(実装したが速くならなかった。2026-09後半)
+
+`docs/design.md`の「EGCによるスプライト高速化」節に設計・考察をまとめた。
+ここでは実測データを記録する。
+
+### 8-1. マスク・シフトの実測(WebNP2-wikiの「未検証」を解消)
+
+使い捨てのプローブ(コミットには残していない。他の実測と同じ方針)で、
+EGCレジスタの組み合わせを総当たりで実測した。
+
+**マスク(0x4A8)**: WM候補(0x0000/0x1000/0x2000/0x3000)×マスク候補
+(0xFFFF/0x0000/0x0F0F/0xF0F0)×(事前読み出し有り/無し)の全組み合わせで
+実測。結果は以下のいずれかにしかならず、ビット単位の部分マスクは
+一度も再現できなかった:
+
+```
+WM=0000 mask=FFFF: ff (全ビット上書き)
+WM=0000 mask=0000: f0 (無変化)
+WM=0000 mask=0F0F: ff (部分マスクを期待したが全ビット上書き)
+WM=0000 mask=F0F0: f0 (部分マスクを期待したが無変化)
+WM=1000 mask=FFFF: 00 (ゼロ化。上書きでも無変化でもない)
+WM=1000 mask=0F0F: f0 (無変化)
+WM=2000 系列はWM=0000と同じ、WM=3000系列はWM=1000と同じ結果だった。
+```
+
+**シフト(0x4AC)**: バイト単位の書き込み(`mov [es:bx],al`)では効果0
+(shift候補0〜7すべて元の値のまま)。ワード単位の書き込み
+(`mov ax,[..]` → `mov [..],ax`)では明確な効果があった:
+
+```
+shift候補=0: FF (無変化)
+shift候補=1: FF (無変化)
+shift候補=2: FE  = (0xFF << 1) & 0xFF
+shift候補=3: FC  = (0xFF << 2) & 0xFF
+shift候補=4: F8  = (0xFF << 3) & 0xFF
+shift候補=5: F0  = (0xFF << 4) & 0xFF
+shift候補=6: E0  = (0xFF << 5) & 0xFF
+shift候補=7: C0  = (0xFF << 6) & 0xFF
+```
+
+つまり実効シフト量 = レジスタ値-1(0と1はどちらも無シフト)。ただし
+このワード書き込みの**上位(奇数アドレス)バイトは、どの実験でも一切
+更新されなかった**(元の値のまま)。2ワード連続で書いてもキャリー
+(繰り上がり)は発生しなかった。
+
+VRAM可視領域外(セグメント内オフセット33000)への読み書きは正常にできる
+ことを確認した(スクラッチ領域として使用可能)。そこに書いたデータを
+`rep movsw`で読みながらシフト転送しようとしたが、**EGC有効中の
+`rep movsw`によるVRAM読み出しは常に0を返し、実際の格納値を読めなかった**
+(WM=0x0000の場合)。この技法(実機PC-98ゲームでよく使われる「VRAM常駐
+パターンをEGCでシフト転送する」)は、今回試した設定では再現できなかった。
+
+以上の実測により、wikiが「未検証」としていたマスク・シフトは
+**「確認した。ただし期待した使い方(ビット単位マスク・ワードをまたぐ
+シフト・EGC経由のVRAM読み出し)はどれも成立しなかった」**という形で
+解消した。
+
+### 8-2. 等価性検査: CPU経路とEGC経路は完全に一致(上記ログ参照)
+
+`tests/probe_sprite.c`(CPU)と`tests/probe_sprite_egc.c`(EGC、座標・
+スプライトデータは同一)を同じ検査関数(`checkSpriteScenario`、
+`tools/verify.mjs`)で検証し、シフト0〜7・複数色+マスク穴・重ね描き・
+四隅クリップの全項目で**両者のVRAMバイト列が完全に一致**することを
+確認した(上記実行ログの`[CPU]`/`[EGC]`タグ参照)。
+
+### 8-3. 故障注入: 0x4A0(プレーン選択)は効かず、0x4A4(WM)で検出できた
+
+当初「0x4A0(プレーン選択)を誤らせる」故障注入を試みたが、**np2kaiの
+このEGC実装では0x4A0の値(0xFF00で書いても、書かずに省略しても、
+明示的に0x0000にしても)に関わらず、常に4プレーンぶん書かれてしまい、
+一つも検出できなかった**(実測して初めて分かったこと。理由は未確認だが、
+「直接アドレス指定したプレーン(青)は常に書かれる」という基本動作に
+対し、np2kaiの実装が「他プレーンへのミラーは常に行う」という単純化を
+している可能性を考えている)。そのため、WM(0x4A4)を誤った値
+(0x1000=パターンを書くモード)にする故障注入に変更したところ、
+期待どおり検出できた(`Bplane byte13 actual=[00]`、正常なら`0xFF`)。
+
+### 8-4. 速度のA/B比較: EGCはCPU合成よりわずかに遅かった
+
+条件: スプライト16x16(全プレーン0xFF・マスク0xFFの最悪ケース。この
+スプライトは全バイトがEGC経路[fast path]の対象になる)、本数2000
+(`probe_sprite_bench.c`/`probe_sprite_bench_egc.c`のBENCH_N×BENCH_ITERS)、
+同じ座標列、同じ測定方法(ホスト側`performance.now()`、共通ベースライン
+`probe_sprite_bench0.c`との差分、3回測定の中央値)。
+
+```
+baseline(0本描画): [180, 139, 143]ms (中央値143ms)
+CPU経路(2000本):   [7785, 7597, 7564]ms (中央値7597ms)
+EGC経路(2000本):   [8052, 7984, 7990]ms (中央値7990ms)
+
+CPU経路: 1体あたり約3.727ms ≈ 約268体/秒
+EGC経路: 1体あたり約3.923ms ≈ 約255体/秒
+比(EGC/CPU) = 約0.95倍(EGCの方がわずかに遅い)
+```
+
+**この結果を無理に速く見せず、そのまま報告する。** 今回試したEGCの
+使い方(4プレーン分のread-modify-write×4回を、1回のEGC書き込みに
+置き換える)は、このnp2kai実装ではCPU合成より速くならなかった。
+考察と次の手の候補は`docs/design.md`「EGCによるスプライト高速化」節を
+参照。**これはnp2kai(WebNP2)のEGCエミュレーション実装+puppeteerという
+この実行環境全体を通した相対値であり、実機での比率とは限らない。**
+
+### 8-5. 後始末: テキスト表示・DOS続行への影響なし
+
+`probe_sprite_bench_egc.c`(EGCを何度も有効化/無効化しながら2000回描画し、
+`p98_quit()`で正常に抜ける)の実行後、DOSコマンド(`VER`)を実行して
+プロンプトが正常に返る(画面がグラフィック/EGCのままハングしていない、
+テキストVRAMも化けていない)ことを確認した。`p98_quit()`自体にも念のため
+`0x7C=0`(EGC/GRCG無効化)を追加してある(`src/p98.c`参照)。
+
+### 8-6. 未確認・既知の限界
+
+- なぜEGCが速くならなかったかの正確な原因(ポートI/Oのエミュレーション
+  コスト自体が重いのか、他の要因か)は特定していない(`docs/design.md`の
+  考察は推測)。
+- マスク・シフトの全パターン(全WM値×全マスク値×全シフト値の総当たり)は
+  網羅していない。今回実測した代表的な組み合わせで「期待した使い方は
+  できない」という結論に達したため、それ以上の組み合わせ探索は
+  打ち切った。
+- 0x4A0(プレーン選択)がなぜ効かないのかは未調査(np2kaiのソースを
+  読む選択肢もあるが、今回はエミュレータ実装の解析はスコープ外とした)。
+- 実機での確認は行っていない(他の節と同じ限界)。
+
 ## 未実施(スコープ外)
 
 - 実機での確認: 全てnp2kai上の実測であり、実機PC-98での動作は未確認。
@@ -474,5 +647,8 @@ baseline(0本描画)の実行時間: [391, 180, 151]ms (中央値180ms)
   既存テストでは使われておらず、今回のスプライト速度計測で初めて
   实際に呼び出された。実際のゲームでの動作に影響する可能性がある論点
   として、次回以降の検討課題として残す)。
-- EGCによるスプライトの高速化: 今回はCPU合成(peekb/pokeb相当の
-  read-modify-write)のみ。`docs/design.md`参照。
+- EGCによるスプライトの高速化: 実装・等価性検証・A/B速度比較まで実施
+  したが、**このnp2kai実装ではCPU合成より速くならなかった**(約0.95倍)。
+  `docs/design.md`「EGCによるスプライト高速化」節・本ファイル8節参照。
+  次の手の候補(GRCG RMWモードの実測、転送単位の見直し、EGCポートI/O
+  コスト自体の実測)も`docs/design.md`に記載。

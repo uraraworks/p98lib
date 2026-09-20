@@ -113,4 +113,26 @@ typedef struct {
  */
 void p98_draw_sprite(const p98_sprite_t *spr, int x, int y);
 
+/* ---- 描画バックエンド(CPU合成 / EGC。2026-09後半、docs/design.md参照) ----
+ * P98_SPRITE_CPU: 常に p98__blend_bits(1バイト単位のread-modify-write)で
+ *   4プレーンぶん個別に書く。全ケースで正しく動く既定値。
+ * P98_SPRITE_EGC: 実測で確認できたEGCの「1回のCPU書き込みで4プレーン
+ *   すべてに同じ値を書ける」機能を使い、透明ドットを含まず4プレーンの
+ *   結果が全て同一になるバイト(単色スプライトの内部等)だけを高速化する。
+ *   それ以外のバイト(マスクの穴・プレーンごとに異なる色)はCPU経路に
+ *   自動でフォールバックするため、**見た目の結果はP98_SPRITE_CPUと
+ *   常に一致する**(tools/verify.mjsの等価性検査で確認済み)。
+ *   マスク・シフトレジスタ自体はEGCの機能として使っていない(実測で
+ *   ビット単位のマスク合成が再現できなかったため。docs/design.md参照)。
+ */
+typedef enum { P98_SPRITE_CPU = 0, P98_SPRITE_EGC = 1 } p98_sprite_backend_t;
+
+/* 以後の p98_draw_sprite() が使うバックエンドを切り替える(既定:CPU)。 */
+void p98_set_sprite_backend(p98_sprite_backend_t backend);
+p98_sprite_backend_t p98_get_sprite_backend(void);
+
+/* p98_set_sprite_backend()の設定に関わらず、バックエンドを明示して描く
+ * (検証用。両方のバックエンドを同じプログラム内で叩き分けられるように)。 */
+void p98_draw_sprite_ex(const p98_sprite_t *spr, int x, int y, p98_sprite_backend_t backend);
+
 #endif /* P98_H */
