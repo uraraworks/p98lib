@@ -1,4 +1,10 @@
 /*
+ * ★故障注入版(tests/p98_broken_bgpage_shrink.c)★
+ * src/p98.c のコピーに対し、p98_draw_sprite_diff()が覚える復元矩形の
+ * 高さを1ドット分だけ小さくしてある(下端1行を復元しないまま次へ進む)。
+ * docs/verify-log.mdの陰性対照(「背景が完全一致する」検査自体がFAILを
+ * 検出できることの確認)専用。通常のビルド・配布物には含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -776,7 +782,10 @@ void p98_draw_sprite_diff(const p98_sprite_t *spr, int x, int y) {
             p98__diff_byte_x = byteX;
             p98__diff_y = y0;
             p98__diff_byte_w = byteW;
-            p98__diff_h = y1 - y0;
+            /* ★故障注入: 本来は y1 - y0 のはずが、1ドット分小さくしてある
+             * (下端1行を次回復元しない)。 */
+            p98__diff_h = (y1 - y0) - 1;
+            if (p98__diff_h < 0) p98__diff_h = 0;
             p98__diff_valid = (byteW > 0) ? 1 : 0;
         } else {
             p98__diff_valid = 0;

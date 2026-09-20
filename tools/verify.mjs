@@ -196,6 +196,7 @@ async function main() {
     spriteExe, spriteNoMaskExe, spriteNoClipExe, spriteBenchExe, spriteBench0Exe,
     spriteEgcExe, spriteEgcBrokenExe, spriteBenchEgcExe,
     walkExe, walkBrokenExe,
+    bgpageExe, bgpageBrokenExe, bgpageBenchFullExe, bgpageBenchDiffExe, bgpageBench0BgExe,
   ] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
@@ -213,8 +214,13 @@ async function main() {
     buildOrThrow('tests/probe_sprite_bench_egc.c'),
     buildOrThrow('samples/walk.c'),
     buildOrThrow('tests/walk_broken_nobg.c'),
+    buildOrThrow('tests/probe_bgpage.c'),
+    buildOrThrow('tests/probe_bgpage.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_bgpage_shrink.c') }),
+    buildOrThrow('tests/probe_bgpage_bench_full.c'),
+    buildOrThrow('tests/probe_bgpage_bench_diff.c'),
+    buildOrThrow('tests/probe_bgpage_bench0_bg.c'),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / walk(デモ) / walk(故障注入=背景復帰無し)');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -233,6 +239,11 @@ async function main() {
     spriteegc: programFdFor(spriteEgcExe, 'PROBE_SP'),
     spriteegcbroken: programFdFor(spriteEgcBrokenExe, 'PROBE_SP'),
     spritebenchegc: programFdFor(spriteBenchEgcExe, 'PROBE_SE'),
+    bgpage: programFdFor(bgpageExe, 'PROBE_BG'),
+    bgpagebroken: programFdFor(bgpageBrokenExe, 'PROBE_BG'),
+    bgpagebenchfull: programFdFor(bgpageBenchFullExe, 'PROBE_BF'),
+    bgpagebenchdiff: programFdFor(bgpageBenchDiffExe, 'PROBE_BD'),
+    bgpagebench0bg: programFdFor(bgpageBench0BgExe, 'PROBE_B0'),
   };
 
   const server = await startServer(programFds);
@@ -557,11 +568,11 @@ async function main() {
     //   本数2000(=BENCH_N 40 × BENCH_ITERS 50)、同じ座標列、同じ測定方法。
     const SPRITE_BENCH_N = 40 * 50; // tests/probe_sprite_bench*.c の BENCH_N*BENCH_ITERS と一致させる
     const median = (arr) => { const s = [...arr].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
-    async function measureRunTimes(program, stem) {
+    async function measureRunTimes(program, stem, timeoutMs = 15000) {
       const times = [];
       await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
         await page.evaluate((port, prog) => window.p98probe.boot(`http://127.0.0.1:${port}/program/${prog}.xdf`), PORT, program);
-        for (let i = 0; i < 3; i++) times.push(await page.evaluate((s) => window.p98probe.runTimed(s, 15000), stem));
+        for (let i = 0; i < 3; i++) times.push(await page.evaluate((s, t) => window.p98probe.runTimed(s, t), stem, timeoutMs));
         if (errors.length) console.log(`page errors(${program}):`, errors);
       });
       console.log(`${program}の実行時間: [${times.map((v) => v.toFixed(0)).join(', ')}]ms`);
@@ -773,6 +784,94 @@ async function main() {
       const alive = /FreeDOS|Kernel|Version/i.test(verText);
       results.push({ label: '[walk故障注入] ESCで終了後もDOSコマンド(VER)が正常応答する', ok: alive, actual: alive ? '応答あり' : verText.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} [walk故障注入] ESC終了後にVERを実行してプロンプトが返る`);
+    });
+
+    console.log('\n--- 背景ページ+差分復帰(EGC活用。probe_bgpage: 通過後の背景が原本と完全一致) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/bgpage.xdf`, 'PROBE_BG', { waitMs: 2000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+
+      // 1箇所目(x=16,y=16、バンドの上): 3箇所目まで動いた後、バンド
+      // (色10=赤+輝度)そのものに戻っているはず。
+      const rowBand = 16 * ROW;
+      for (const plane of ['B', 'R', 'G', 'I']) {
+        const mem = await page.evaluate((addr, len) => window.p98probe.readMemory(addr, len), PLANE[plane] + rowBand + 2, 1);
+        const expect = { B: 0x00, R: 0xFF, G: 0x00, I: 0xFF }[plane];
+        assertEqual(`[bgpage] 1箇所目(バンド上)は背景に復元されている ${plane}plane`, mem, [expect], results);
+      }
+      // 2箇所目(x=208,y=100、単発矩形の上): 3箇所目まで動いた後、
+      // 矩形の色(5=青+緑)そのものに戻っているはず。
+      const rowRect = 100 * ROW;
+      for (const plane of ['B', 'R', 'G', 'I']) {
+        const mem = await page.evaluate((addr, len) => window.p98probe.readMemory(addr, len), PLANE[plane] + rowRect + 26, 1);
+        const expect = { B: 0xFF, R: 0x00, G: 0xFF, I: 0x00 }[plane];
+        assertEqual(`[bgpage] 2箇所目(矩形上)は背景に復元されている ${plane}plane`, mem, [expect], results);
+      }
+      // 3箇所目(x=304,y=300、今描いたキャラ): 全プレーン白のはず。
+      const rowChar = 300 * ROW;
+      for (const plane of ['B', 'R', 'G', 'I']) {
+        const mem = await page.evaluate((addr, len) => window.p98probe.readMemory(addr, len), PLANE[plane] + rowChar + 38, 1);
+        assertEqual(`[bgpage] 3箇所目(今のキャラ位置) ${plane}plane`, mem, [0xFF], results);
+      }
+    });
+
+    console.log('\n--- 故障注入: probe_bgpage(復元矩形を1ドット縮小した版)は背景一致検査でFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/bgpagebroken.xdf`, 'PROBE_BG', { waitMs: 2000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+
+      // 1箇所目の下端行(row23=y16+7)は、1ドット縮小した版では復元されず
+      // 白(0xFF)が残っているはず(正常なら0x00/0xFF/0x00/0xFFのバンド)。
+      const rowEdge = 23 * ROW;
+      const mem = await page.evaluate((addr, len) => window.p98probe.readMemory(addr, len), PLANE.B + rowEdge + 2, 1);
+      const leftover = mem[0] !== 0x00;
+      results.push({
+        label: '[bgpage故障注入] 1箇所目の下端行に残像が残る(検査が故障を検出できること)',
+        ok: leftover, actual: mem, expected: '0x00ではない(残像が残っているはず)',
+      });
+      console.log(`${leftover ? 'OK  ' : 'FAIL'} [bgpage故障注入] 下端行に残像が残ることを検出 actual=[${bytesToHex(mem)}]`);
+    });
+
+    console.log('\n--- 背景ページ+差分復帰のA/B速度比較(重い背景40矩形、同一条件でBENCH_FRAMES=300回更新) ---');
+    {
+      const baseFullMs = await measureRunTimes('spritebench0', 'PROBE_S0'); /* p98_init/flip/clear/quitのみ。probe_bgpage_bench_full.cと同じ固定オーバーヘッド */
+      const baseDiffMs = await measureRunTimes('bgpagebench0bg', 'PROBE_B0'); /* p98_init_bgpage+背景描画2回+quit。probe_bgpage_bench_diff.cと同じ固定オーバーヘッド */
+      const fullMs = await measureRunTimes('bgpagebenchfull', 'PROBE_BF', 40000); /* 重い背景の全描き直しは1回20秒前後かかるため、既定15秒より長めに待つ */
+      const diffMs = await measureRunTimes('bgpagebenchdiff', 'PROBE_BD', 40000);
+
+      const BG_BENCH_FRAMES = 300; /* tests/probe_bgpage_bench_{full,diff}.c の BENCH_FRAMES と一致させる */
+      const fullPerFrameMs = (fullMs - baseFullMs) / BG_BENCH_FRAMES;
+      const diffPerFrameMs = (diffMs - baseDiffMs) / BG_BENCH_FRAMES;
+      const fullFps = fullPerFrameMs > 0 ? 1000 / fullPerFrameMs : Infinity;
+      const diffFps = diffPerFrameMs > 0 ? 1000 / diffPerFrameMs : Infinity;
+      console.log(`条件: 背景=40矩形(8列x5行、各20x20)+p98_clear、キャラ=16x16白ベタ1体、${BG_BENCH_FRAMES}フレーム更新、同一座標列`);
+      console.log(`毎フレーム全描き直し: baseline=${baseFullMs.toFixed(0)}ms, 本編=${fullMs.toFixed(0)}ms, 差分=${(fullMs - baseFullMs).toFixed(0)}ms → 1フレームあたり約${fullPerFrameMs.toFixed(3)}ms ≈ 約${fullFps.toFixed(1)}fps`);
+      console.log(`背景ページ差分復帰: baseline=${baseDiffMs.toFixed(0)}ms, 本編=${diffMs.toFixed(0)}ms, 差分=${(diffMs - baseDiffMs).toFixed(0)}ms → 1フレームあたり約${diffPerFrameMs.toFixed(3)}ms ≈ 約${diffFps.toFixed(1)}fps`);
+      console.log(`比(差分復帰/全描き直し、更新頻度): ${(diffFps / fullFps).toFixed(2)}倍`);
+      console.log('注意: これはnp2kai(WebNP2)+puppeteerというこの実行環境全体を通した相対値であり、実機での比率とは限らない。定性的な結論(速い/変わらない/遅い)のみ採る。');
+      const ok = Number.isFinite(fullPerFrameMs) && fullPerFrameMs > 0 && Number.isFinite(diffPerFrameMs) && diffPerFrameMs > 0;
+      results.push({
+        label: '背景ページ差分復帰のA/B速度比較が完了(具体的な数値・比率は合否判定の対象ではない。docs/verify-log.md参照)',
+        ok, actual: `全描き直し約${fullFps.toFixed(1)}fps, 差分復帰約${diffFps.toFixed(1)}fps`, expected: '両方とも正の値が計測できていること',
+      });
+      console.log(ok ? 'OK   背景ページ差分復帰のA/B速度比較が完了' : 'FAIL 背景ページ差分復帰のA/B速度比較に失敗(差分が0以下)');
+    }
+
+    console.log('\n--- 背景ページモード使用後の後始末(EGC後始末・DOS続行への影響が無いこと) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      // probe_bgpage_bench_diff.cはEGCを300回(復元のたび)有効化/無効化
+      // しながらp98_quit()で正常に抜ける。p98_quit()自体も0x7Cを無効化する
+      // 保険を持つ(src/p98.c参照)。EGCを大量に使った直後でも、
+      //  (a) p98_quit()後にDOSプロンプトへ戻りコマンドを実行できる
+      //      (画面がグラフィック/EGCのままハングしていない)
+      //  (b) VERコマンドの出力が正しく読める(テキストVRAMが化けていない)
+      // ことを確認する。
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/bgpagebenchdiff.xdf`, 'PROBE_BD', { waitForExit: true }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      const text = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
+      const alive = /FreeDOS|Kernel|Version/i.test(text);
+      results.push({ label: '[bgpage] 差分復帰を大量に使った後もp98_quit()後にDOSコマンド(VER)が正常応答する', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
+      console.log(`${alive ? 'OK  ' : 'FAIL'} [bgpage] 差分復帰使用後、p98_quit後にVERを実行してプロンプトが返る`);
     });
 
     console.log('\n--- p98_quit後もDOSが生きている(コマンドを1つ実行してプロンプトが返る) ---');

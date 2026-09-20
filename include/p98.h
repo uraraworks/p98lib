@@ -141,4 +141,56 @@ p98_sprite_backend_t p98_get_sprite_backend(void);
  * (検証用。両方のバックエンドを同じプログラム内で叩き分けられるように)。 */
 void p98_draw_sprite_ex(const p98_sprite_t *spr, int x, int y, p98_sprite_backend_t backend);
 
+/* ---- 背景ページ+差分復帰(EGC活用。2026-09、docs/design.md参照) ----
+ *
+ * p98_flip()によるダブルバッファリングとは**兼用できない**(どちらもポート
+ * 0xA6でページを切り替える点は同じだが、意味が違う。flipは「表示・描画を
+ * 毎フレーム入れ替える」、こちらは「表示ページを固定し、もう一方を
+ * “背景の原本”として使う」)。p98_flip()の「動く絵を描くたびに背景の
+ * 退避・復元を利用者が自分で書く必要がある」という制約(walk.cのサンプル・
+ * design.mdの所見参照)を、EGCのVRAM→VRAMコピーで軽減するための経路。
+ *
+ * 使い方:
+ *   1. p98_init()の代わりにp98_init_bgpage()で初期化する。
+ *   2. p98_set_draw_target(P98_TARGET_BACKGROUND)にしてから、通常の
+ *      p98_clear()/p98_fill_rect()/p98_draw_sprite()で背景を1回だけ
+ *      背景ページへ描く。
+ *   3. p98_set_draw_target(P98_TARGET_SCREEN)(既定)に戻し、以後は
+ *      毎フレームp98_draw_sprite_diff()でキャラクタ等を描く。前回この
+ *      関数が描いた矩形(バイト境界に外側へ切り上げた範囲)を背景ページ
+ *      から画面ページへ復元してから、新しい位置へ描いてくれる。
+ *
+ * 制限:
+ *   - p98_flip()はbgpageモードでは呼んではいけない(呼んでも何もしない)。
+ *   - p98_draw_sprite_diff()が復元する範囲は、スプライトのx/y/w/hを
+ *     バイト境界(8ドット)へ外側に切り上げた矩形。x/yがバイト境界に
+ *     揃っていないスプライトでも動くが、切り上げた分だけ余分にコピーが
+ *     発生する。
+ *   - 同時に動かせるのは1体分(直前の1矩形)だけ。複数のスプライトを
+ *     同時に動かす場合は、それぞれ別にp98_fill_rect等で背景ページ側の
+ *     内容を工夫するか、次回以降のスコープで複数スロット対応を検討する
+ *     (今回は単一スロットのみ)。
+ */
+typedef enum { P98_RENDER_FLIP = 0, P98_RENDER_BGPAGE = 1 } p98_render_mode_t;
+
+/* p98_init()と同じ初期化に加え、背景ページ+差分復帰モードにする。 */
+int p98_init_bgpage(void);
+
+/* 現在の描画モード(既定はP98_RENDER_FLIP。p98_init_bgpage()した場合のみP98_RENDER_BGPAGE)。 */
+p98_render_mode_t p98_get_render_mode(void);
+
+typedef enum { P98_TARGET_SCREEN = 0, P98_TARGET_BACKGROUND = 1 } p98_draw_target_t;
+
+/* 以後のp98_clear()/p98_fill_rect()/p98_draw_sprite()の描画先を切り替える。
+ * P98_RENDER_BGPAGEモードでのみ意味を持つ(P98_RENDER_FLIPでは何もしない)。
+ */
+void p98_set_draw_target(p98_draw_target_t target);
+
+/* 前回このAPIで描いた矩形を背景ページから画面ページへ復元してから、
+ * sprを(x,y)へ描く。最初の呼び出し(前回の矩形が無い)では復元をしない。
+ * P98_RENDER_FLIPモードで呼んだ場合はp98_draw_sprite()と同じ動作になる
+ * (背景復元はできないためフォールバック)。
+ */
+void p98_draw_sprite_diff(const p98_sprite_t *spr, int x, int y);
+
 #endif /* P98_H */
