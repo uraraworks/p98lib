@@ -81,6 +81,23 @@ export async function buildProgram(userSourcePath, opts = {}) {
   const p98Header = await readFile(join(REPO_ROOT, 'include', 'p98.h'));
   includeFiles['p98.h'] = new Uint8Array(p98Header);
 
+  // ユーザーの.cと同じディレクトリ、および samples/(共有アセットヘッダの置き場。
+  // 例: samples/kya_assets.h。tests/配下のプローブからも#includeするため)に
+  // ある.hを includeFiles へ足す(2026-09後半、KYA変換デモ向け追加)。
+  const { readdir } = await import('node:fs/promises');
+  async function addHeadersFrom(dir) {
+    try {
+      const entries = await readdir(dir);
+      for (const entry of entries) {
+        if (entry.endsWith('.h') && includeFiles[entry] === undefined) {
+          includeFiles[entry] = new Uint8Array(await readFile(join(dir, entry)));
+        }
+      }
+    } catch { /* ディレクトリが読めない場合は何もしない */ }
+  }
+  await addHeadersFrom(dirname(userSourcePath));
+  await addHeadersFrom(join(REPO_ROOT, 'samples'));
+
   // 1. ライブラリ(p98.c、または故障注入版)を単独でオブジェクト化する。
   const libObject = await tools.compileToObjectWithFactories(new Uint8Array(libSource), {
     includeFiles, model: 'huge',

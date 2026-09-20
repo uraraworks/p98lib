@@ -11,6 +11,7 @@ import { createRequire } from 'node:module';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildProgram } from './build.mjs';
+import { buildAssetSet } from './kya_convert.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(HERE);
@@ -173,6 +174,36 @@ function assertEqual(label, actual, expected, results) {
 const PLANE = { B: 0xA8000, R: 0xB0000, G: 0xB8000, I: 0xE0000 };
 const ROW = 80;
 
+// 矩形(x,y,w,h。x/wはバイト境界=8の倍数)ぶんのVRAMを4プレーンとも読み、
+// tools/kya_convert.mjs の buildAssetSet() が返す rect.planes と同じ形
+// (プレーンごとに Buffer、1行=wBytesバイトを詰めて並べた配列)で返す。
+// KYA変換結果の実値検証・walk2デモの検証で共通に使う。
+async function readVramRect(page, x, y, w, h) {
+  const wBytes = w / 8;
+  const addrs = [];
+  for (const key of ['B', 'R', 'G', 'I']) {
+    for (let row = 0; row < h; row++) {
+      addrs.push([PLANE[key] + (y + row) * ROW + x / 8, wBytes]);
+    }
+  }
+  const flat = await page.evaluate((list) => list.map(([addr, len]) => window.p98probe.readMemory(addr, len)), addrs);
+  const planes = [];
+  for (let p = 0; p < 4; p++) {
+    const buf = Buffer.alloc(wBytes * h);
+    for (let row = 0; row < h; row++) {
+      const bytes = flat[p * h + row];
+      for (let i = 0; i < wBytes; i++) buf[row * wBytes + i] = bytes[i];
+    }
+    planes.push(buf);
+  }
+  return { w, h, wBytes, planes };
+}
+
+function rectPlanesEqual(a, b) {
+  for (let p = 0; p < 4; p++) if (!a.planes[p].equals(b.planes[p])) return false;
+  return true;
+}
+
 async function withPage(browser, url, fn) {
   const page = await browser.newPage();
   const pageErrors = [];
@@ -188,15 +219,20 @@ async function withPage(browser, url, fn) {
   }
 }
 
+const KYA_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA/MITEI2.KYA');
+
 async function main() {
   const results = [];
   console.log('--- ビルド ---');
+  const assetSet = await buildAssetSet(KYA_PATH);
   const [
     fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe,
     spriteExe, spriteNoMaskExe, spriteNoClipExe, spriteBenchExe, spriteBench0Exe,
     spriteEgcExe, spriteEgcBrokenExe, spriteBenchEgcExe,
     walkExe, walkBrokenExe,
     bgpageExe, bgpageBrokenExe, bgpageBenchFullExe, bgpageBenchDiffExe, bgpageBench0BgExe,
+    walk2AssetsExe, walk2AssetsBrokenExe, walk2Exe,
+    walk2BenchFullExe, walk2BenchDiffExe, walk2Bench0BgExe,
   ] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
@@ -219,8 +255,14 @@ async function main() {
     buildOrThrow('tests/probe_bgpage_bench_full.c'),
     buildOrThrow('tests/probe_bgpage_bench_diff.c'),
     buildOrThrow('tests/probe_bgpage_bench0_bg.c'),
+    buildOrThrow('tests/probe_walk2_assets.c'),
+    buildOrThrow('tests/probe_walk2_assets_broken.c'),
+    buildOrThrow('samples/walk2.c'),
+    buildOrThrow('tests/probe_walk2_bench_full.c'),
+    buildOrThrow('tests/probe_walk2_bench_diff.c'),
+    buildOrThrow('tests/probe_walk2_bench0_bg.c'),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -244,6 +286,12 @@ async function main() {
     bgpagebenchfull: programFdFor(bgpageBenchFullExe, 'PROBE_BF'),
     bgpagebenchdiff: programFdFor(bgpageBenchDiffExe, 'PROBE_BD'),
     bgpagebench0bg: programFdFor(bgpageBench0BgExe, 'PROBE_B0'),
+    walk2assets: programFdFor(walk2AssetsExe, 'PROBE_WA'),
+    walk2assetsbroken: programFdFor(walk2AssetsBrokenExe, 'PROBE_WA'),
+    walk2: programFdFor(walk2Exe, 'WALK2'),
+    walk2benchfull: programFdFor(walk2BenchFullExe, 'PROBE_W1'),
+    walk2benchdiff: programFdFor(walk2BenchDiffExe, 'PROBE_W2'),
+    walk2bench0bg: programFdFor(walk2Bench0BgExe, 'PROBE_W3'),
   };
 
   const server = await startServer(programFds);
@@ -903,6 +951,222 @@ async function main() {
       results.push({ label: 'EGC使用後もp98_quit()後にDOSコマンド(VER)が正常応答する(画面・テキスト表示が壊れていない)', ok: alive, actual: alive ? '応答あり' : text.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} EGC使用後、p98_quit後にVERを実行してプロンプトが返る`);
     });
+
+    // ---- ここから: KYA実素材(MITEI2.KYA、C-GAMES/SAKA由来)を使ったデモ2 ----
+
+    console.log('\n--- KYA変換アセットの実値検証(probe_walk2_assets: タイル2種+4方向キャラがVRAM上で変換結果と一致) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/walk2assets.xdf`, 'PROBE_WA', { waitMs: 2000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+
+      const checks = [
+        ['地面タイル(草)', assetSet.ground.rect, 0, 0, 16, 16],
+        ['地面タイル(レンガ)', assetSet.accent.rect, 16, 0, 16, 16],
+        ['キャラDOWN[0]', assetSet.down[0].rect, 64, 64, 32, 32],
+        ['キャラLEFT[0]', assetSet.leftFrames[0].rect, 160, 64, 32, 32],
+        ['キャラRIGHT[0](左向きの水平反転)', assetSet.rightFrames[0].rect, 256, 64, 32, 32],
+        ['キャラUP[0]', assetSet.up[0].rect, 352, 64, 32, 32],
+      ];
+      for (const [label, expectedRect, x, y, w, h] of checks) {
+        const actual = await readVramRect(page, x, y, w, h);
+        const ok = rectPlanesEqual(actual, expectedRect);
+        results.push({ label: `[kya変換] ${label}(x=${x},y=${y})がVRAM上で変換結果と一致`, ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [kya変換] ${label} が変換結果と一致`);
+      }
+    });
+
+    console.log('\n--- 故障注入: probe_walk2_assets_broken(R/Gプレーン入替版)はVRAM照合でFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/walk2assetsbroken.xdf`, 'PROBE_WA', { waitMs: 2000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+
+      // 正しい期待値(assetSet、R/G入替前)と突き合わせる。故障注入版は
+      // R/Gプレーンを入れ替えて生成してあるため、キャラの絵(4プレーンとも
+      // 使う箇所がある)は一致しないはず。
+      const actual = await readVramRect(page, 64, 64, 32, 32);
+      const mismatched = !rectPlanesEqual(actual, assetSet.down[0].rect);
+      results.push({
+        label: '[kya変換故障注入] R/Gプレーン入替版はキャラDOWN[0]が正しい変換結果と一致しない(検査が故障を検出できること)',
+        ok: mismatched, actual: mismatched ? '不一致(検出できた)' : '一致してしまった(検出できていない)', expected: '不一致',
+      });
+      console.log(`${mismatched ? 'OK  ' : 'FAIL'} [kya変換故障注入] R/G入替を検出`);
+    });
+
+    console.log('\n--- サンプル2: walk2(タイル背景+実素材、4方向歩行アニメ。samples/walk2.c) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
+      const tap = async (code) => { await sk(code, true); await sleep(350); await sk(code, false); await sleep(1200); };
+      const SC = { UP: 0x3A, RIGHT: 0x3C, DOWN: 0x3D, LEFT: 0x3B, ESC: 0x00 };
+      const TILE = 16;
+      const ACCENT_MOD = 5; // samples/walk2.c の ACCENT_MOD と一致させる
+      const START_X = 16 * TILE, START_Y = 12 * TILE; // walk2.cの初期位置と一致
+
+      // samples/walk2.c と同じ規則(tx+ty)%ACCENT_MOD===0でタイルを選び、
+      // (x,y,w,h)(すべてTILE=16の倍数)ぶんの「背景だけ」の合成矩形を作る。
+      function tileAt(tx, ty) { return ((tx + ty) % ACCENT_MOD === 0) ? assetSet.accent.rect : assetSet.ground.rect; }
+      function buildBackgroundRect(x, y, w, h) {
+        const wBytes = w / 8;
+        const planes = [Buffer.alloc(wBytes * h), Buffer.alloc(wBytes * h), Buffer.alloc(wBytes * h), Buffer.alloc(wBytes * h)];
+        for (let ty = 0; ty < h / TILE; ty++) {
+          for (let tx = 0; tx < w / TILE; tx++) {
+            const tile = tileAt(x / TILE + tx, y / TILE + ty);
+            for (let row = 0; row < TILE; row++) {
+              for (let p = 0; p < 4; p++) {
+                const srcOff = row * tile.wBytes;
+                const dstOff = (ty * TILE + row) * wBytes + tx * tile.wBytes;
+                tile.planes[p].copy(planes[p], dstOff, srcOff, srcOff + tile.wBytes);
+              }
+            }
+          }
+        }
+        return { w, h, wBytes, planes };
+      }
+      // p98_draw_sprite/p98_draw_sprite_diffと同じマスク合成: out = (bg & ~mask) | (sprite & mask)。
+      function blendSprite(bgRect, frame) {
+        const { rect: spr, mask } = frame;
+        const planes = bgRect.planes.map((bgPlane, p) => {
+          const out = Buffer.alloc(bgPlane.length);
+          for (let i = 0; i < out.length; i++) out[i] = (bgPlane[i] & ~mask[i]) | (spr.planes[p][i] & mask[i]);
+          return out;
+        });
+        return { w: bgRect.w, h: bgRect.h, wBytes: bgRect.wBytes, planes };
+      }
+      function expectedComposite(x, y, frame) {
+        return blendSprite(buildBackgroundRect(x, y, frame.rect.w, frame.rect.h), frame);
+      }
+
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/walk2.xdf`), PORT);
+      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('WALK2'));
+      // walk2.cはp98_init_bgpage()の後、40x25=1000枚のタイルを背景ページ・
+      // 画面ページの両方へ(=2000回のp98_draw_sprite呼び出し)描いてから
+      // ループへ入る。スプライト速度計測(前節、CPU経路約266体/秒)から
+      // 見積もると、この初期化だけで7秒前後かかる。3秒程度で読みに行くと
+      // 「まだ何も描かれていない/描画途中」を「壊れている」と誤検出したため
+      // (最初にこの節を書いたときに実際に踏んだ)、十分に余裕を見て待つ。
+      await sleep(15000);
+
+      // readVramRectは1回の読み取りが安定している前提(probe_*系と同様、
+      // 直前のキー操作からの待ち時間を確保して安定させる。walk.cの節にある
+      // readManyStableほど厳密な安定化はしていないが、各操作後1.2秒待つ
+      // ことで実測上は安定して読めている)。
+
+      // 1) 起動直後: DOWN[0]が初期位置に、タイル背景の上に合成されて出ている。
+      {
+        const actual = await readVramRect(page, START_X, START_Y, 32, 32);
+        const expected = expectedComposite(START_X, START_Y, assetSet.down[0]);
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '[walk2] 起動直後: キャラがDOWN[0]でタイル背景上の初期位置に出ている', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 起動直後の見た目`);
+      }
+
+      // 2) RIGHTを2回押す: x=START_X+32(TILE2枚ぶん)、向き=RIGHT、
+      //    step=2 -> RIGHT[2]。1回目の位置(START_X+16)は通過するだけなので
+      //    最終的に地面タイルへ復元されているはず。
+      await tap(SC.RIGHT);
+      await tap(SC.RIGHT);
+      const afterRightX = START_X + 32;
+      {
+        const actual = await readVramRect(page, afterRightX, START_Y, 32, 32);
+        const expected = expectedComposite(afterRightX, START_Y, assetSet.rightFrames[2]);
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '[walk2] RIGHTを2回: 向きがRIGHTに変わりアニメがコマ2へ進む', ok, actual: ok ? '一致' : '不一致', expected: '一致(RIGHT[2])' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] RIGHT移動+アニメ切替`);
+      }
+      {
+        // 通過した1マス目(START_X+16, タイル境界)が地面タイルへ復元されている
+        // ことを確認する(このデモの主目的: 差分復帰で背景が壊れていない)。
+        const passedX = START_X + 16;
+        // 32x32のキャラ跡地は2x2枚のタイルにまたがる。左上16x16だけ確認する。
+        const actual = await readVramRect(page, passedX, START_Y, 16, 16);
+        const expected = buildBackgroundRect(passedX, START_Y, 16, 16);
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '【主目的】[walk2] 通過したマスの背景がタイル原本と完全一致(差分復帰が壊れていない)', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 通過後の背景復元`);
+      }
+
+      // 3) DOWNを1回押す: 向き=DOWN、step=3 -> DOWN[3%2=1]。
+      await tap(SC.DOWN);
+      const afterDownY = START_Y + TILE;
+      {
+        const actual = await readVramRect(page, afterRightX, afterDownY, 32, 32);
+        const expected = expectedComposite(afterRightX, afterDownY, assetSet.down[1]);
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '[walk2] DOWNを1回: 向きがDOWNに変わりアニメがコマ1(DOWN[1])になる', ok, actual: ok ? '一致' : '不一致', expected: '一致(DOWN[1])' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] DOWN移動+アニメ切替`);
+      }
+
+      // 4) LEFTを1回押す: 向き=LEFT、step=4 -> LEFT[4%4=0]。
+      await tap(SC.LEFT);
+      const afterLeftX = afterRightX - TILE;
+      {
+        const actual = await readVramRect(page, afterLeftX, afterDownY, 32, 32);
+        const expected = expectedComposite(afterLeftX, afterDownY, assetSet.leftFrames[0]);
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '[walk2] LEFTを1回: 向きがLEFTに変わる(LEFT[0])', ok, actual: ok ? '一致' : '不一致', expected: '一致(LEFT[0])' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] LEFT移動+向き切替`);
+      }
+
+      // 5) UPを1回押す: 向き=UP、step=5 -> UP[5%2=1]。
+      await tap(SC.UP);
+      const afterUpY = afterDownY - TILE;
+      {
+        const actual = await readVramRect(page, afterLeftX, afterUpY, 32, 32);
+        const expected = expectedComposite(afterLeftX, afterUpY, assetSet.up[1]);
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '[walk2] UPを1回: 向きがUPに変わりアニメがコマ1(UP[1])になる', ok, actual: ok ? '一致' : '不一致', expected: '一致(UP[1])' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] UP移動+アニメ切替`);
+      }
+
+      // 6) ESCで終了し、DOSへ戻ることを確認。
+      await sk(SC.ESC, true); await sleep(250); await sk(SC.ESC, false);
+      await page.evaluate((baseline) => window.p98probe.waitPrompt(baseline, 20000), baseline2);
+      if (errors.length) console.log('page errors:', errors);
+      const verText = await page.evaluate(() => window.p98probe.runDosCommand('VER'));
+      const alive = /FreeDOS|Kernel|Version/i.test(verText);
+      results.push({ label: '[walk2] ESCで終了後、DOSコマンド(VER)が正常応答する', ok: alive, actual: alive ? '応答あり' : verText.slice(-200), expected: '応答あり' });
+      console.log(`${alive ? 'OK  ' : 'FAIL'} [walk2] ESC終了後にVERを実行してプロンプトが返る`);
+    });
+
+    console.log('\n--- walk2: タイル背景でのA/B速度比較(全描き直し vs 差分復帰、BENCH_FRAMES=20) ---');
+    {
+      // measureRunTimes(上の「スプライト速度のA/B比較」節で定義した共通関数)は
+      // 呼び出しごとに新しいpage(withPage)を開いてbootする。同じpageを
+      // 使い回してboot()を連続で呼ぶと"core is already booted"で例外になる
+      // ことが分かったため(walk2の速度比較を最初に書いた版はこれで落ちた)、
+      // ここでも同じ関数を使い回す。
+      //
+      // BENCH_FRAMESはbgpage系の300ではなく20にしてある。タイル背景は
+      // 40x25=1000枚をp98_draw_sprite()で毎フレーム敷き詰め直す必要があり
+      // (bgpage系のp98_fill_rect40個より1体あたりのコストが高いCPU合成
+      // スプライトを1000回呼ぶため)、実測でスプライト1体あたり約3.8ms
+      // (前節のCPU経路約266体/秒)から見積もると300フレームでは
+      // 1000*3.8ms*300 ≈ 19分かかってしまい非現実的だった(実際に最初は
+      // 300のままデフォルトタイムアウト15秒で試して"DOSプロンプトを待機中に
+      // タイムアウト"を起こした)。20フレームなら全描き直し版でも1分強で
+      // 収まる。
+      const base0 = await measureRunTimes('spritebench0', 'PROBE_S0');
+      const baseBg0 = await measureRunTimes('walk2bench0bg', 'PROBE_W3');
+      const fullMs = await measureRunTimes('walk2benchfull', 'PROBE_W1', 150000);
+      const diffMs = await measureRunTimes('walk2benchdiff', 'PROBE_W2', 40000);
+
+      const BENCH_FRAMES = 20;
+      const fullPerFrameMs = (fullMs - base0) / BENCH_FRAMES;
+      const diffPerFrameMs = (diffMs - baseBg0) / BENCH_FRAMES;
+      const fullFps = 1000 / fullPerFrameMs;
+      const diffFps = 1000 / diffPerFrameMs;
+      console.log(`walk2(タイル背景)全描き直し: baseline=${base0.toFixed(0)}ms, 本編=${fullMs.toFixed(0)}ms → 1フレームあたり約${fullPerFrameMs.toFixed(3)}ms ≈ 約${fullFps.toFixed(1)}fps`);
+      console.log(`walk2(タイル背景)差分復帰: baseline=${baseBg0.toFixed(0)}ms, 本編=${diffMs.toFixed(0)}ms → 1フレームあたり約${diffPerFrameMs.toFixed(3)}ms ≈ 約${diffFps.toFixed(1)}fps`);
+      if (fullPerFrameMs > 0 && diffPerFrameMs > 0) {
+        console.log(`比: 差分復帰は全描き直しの約${(fullPerFrameMs / diffPerFrameMs).toFixed(2)}倍速い(この実行環境全体を通した相対値。docs/verify-log.md参照)`);
+      }
+      const ok = fullPerFrameMs > 0 && diffPerFrameMs > 0;
+      results.push({
+        label: 'walk2(実素材のタイル背景)でのA/B速度比較が完了(具体的な数値・比率は合否判定の対象ではない。docs/verify-log.md参照)',
+        ok, actual: `全描き直し約${fullFps.toFixed(1)}fps, 差分復帰約${diffFps.toFixed(1)}fps`, expected: '両方とも正の値が計測できていること',
+      });
+      console.log(ok ? 'OK   walk2のA/B速度比較が完了' : 'FAIL walk2のA/B速度比較に失敗(差分が0以下)');
+    }
   } finally {
     await browser.close();
     await rm(profile, { recursive: true, force: true });
