@@ -6,9 +6,12 @@ WebNP2(NP2kai) + FreeDOS(98) を puppeteer で操作し、実際にビルドし�
 **ゲスト自身がメモリを読んで報告したテキスト**で結果を確認する。
 枠組みは `WorkbenchNP2/ide/verify-huge-model.mjs` を参考にした。
 
-最終実行結果: **18/18 OK**(2026-09-20、実行ログは下記)。
+最終実行結果: **26/26 OK**(2026-09-20、実行ログは下記。キーボード追加分含む)。
 
 ```
+--- ビルド ---
+ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=離す処理無し)
+
 --- 矩形塗り + クリップ (probe_fill) ---
 OK   矩形A row8 Bplane byte0..3
 OK   矩形A row8 Rplane byte0..3
@@ -31,13 +34,28 @@ OK   R3(再flip後) = R3=F,0
 OK   故障注入(クリップ無し)は次行の先頭バイトを汚す actual=[ff]
 
 --- 初期化/終了の状態退避・復元 (probe_state) ---
-screen text (末尾): "BEF=564 V0=9C0B V1=8D01 AFT=564 V2=9C0B"
+screen text (末尾): "BEF=564 V0=AD0B V1=8A01 AFT=564 V2=AD0B"
 OK   パレット(色番号1)がp98_quit後に元へ戻る BEF=564 AFT=564
 OK   INT23hベクタはp98_quit後に元へ戻る(0000:008C)
-OK   INT23h V0(元)=9C0B V1(init中)=8D01 (異なるはず)
-OK   INT23h V2(quit後)=9C0B (V0と一致するはず)
+OK   INT23h V0(元)=AD0B V1(init中)=8A01 (異なるはず)
+OK   INT23h V2(quit後)=AD0B (V0と一致するはず)
 
-=== 18/18 OK ===
+--- キーボード (probe_key: down/pressed/release/複数同時/getch) ---
+screen text: "DOWNA_SEEN=1 DOWNA_END=0 DOWNB_SEEN=1 BOTH_SEEN=1 PRESSA=05 PRESSB=01 GETCH=61,61,62,41,61,01,21..."
+OK   押している間 p98_key_down が真(DOWNA_SEEN)
+OK   離すと p98_key_down が偽に戻る(DOWNA_END、これが今回の肝)
+OK   複数キー同時押し(BOTH_SEEN)
+OK   p98_key_pressedはタップ1回につき1回だけ立つ(PRESSA=5回タップ分)
+OK   p98_key_pressedはタップ1回につき1回だけ立つ(PRESSB=1回タップ分)
+OK   p98_key_getchで打った文字列が順番どおり取れる(a,a,b,SHIFT+a=A,a,CTRL+a,SHIFT+1=!)
+
+--- 故障注入: probe_key(離す処理無し版)は②でFAILするはず ---
+OK   故障注入(離す処理無し)はDOWNA_ENDが1のまま actual=1
+
+--- p98_quit後もDOSが生きている(コマンドを1つ実行してプロンプトが返る) ---
+OK   p98_quit後にVERを実行してプロンプトが返る
+
+=== 26/26 OK ===
 ```
 
 (`http404: .../favicon.ico` はテスト用HTMLがfaviconを持たないだけの無害な
@@ -121,8 +139,61 @@ FreeDOSのDOSプロンプトが正常に表示・入力できる(=テキスト�
 より確認しているが、「グラフィック関連レジスタの生の値」までは
 確認できていない。**未確認のまま**として明記する。
 
+### 5. キーボード (`tests/probe_key.c`)
+
+`docs/design.md`の「必ず先に測ること」に書いたとおり、実装前にIRQ1(キーボード)
+の実体を専用の使い捨てプローブ(`tests/probe_key_irq.c`、コミットには残していない)
+で測った。INT09h/INT33hの両方に別々のハンドラを仕込み、
+`np2.sendKey(code, down)`(WebNP2 `docs/AUTOMATION.md`)で外部からスキャンコードを
+注入して確認した結果:
+
+- **IRQ1 = INT 09h**(INT33hには一度も来なかった。design.md旧稿の「INT33hかも
+  しれない」という推測は誤りだった)
+- **マスク(ポート0x02 bit1)は既定で外れていた**
+- **スキャンコードはポート0x41から読める。bit7が離した(break)を示す**
+  (6回のdown/up呼び出しに対し割り込みも6回、最後の`up`直後に読めた値が
+  `0x9E`=`0x1E|0x80`だったことで確認)
+- **EOI(`0x20`を`0x00`へ)が無いと2回目以降の割り込みが来ない**ことを
+  故障注入(EOI削除版)で確認した(1回目だけ来て、以降は永久に来なかった)
+
+その上で`probe_key.c`は250フレーム(約4.4秒)の間、外部から
+`sendKey()`でscancode 0x1D('a')/0x2D('b')/0x01('1')/0x70(SHIFT)/0x74(CTRL)を
+以下の順で注入しながら`p98_poll()`/`p98_key_down()`/`p98_key_pressed()`を
+観測し、最後に`p98_key_getch()`を7回呼んだ:
+
+1. 'a'を単発タップ(350ms押して離す)
+2. 'a'+'b'を同時に押して離す(複数キー同時押し)
+3. SHIFT+'a' → 'a'単独 → CTRL+'a'(各80ms、キーリピートの閾値500ms未満に
+   抑えて実施)
+4. SHIFT+'1'
+
+結果、`DOWNA_SEEN=1`(押している間down)、**`DOWNA_END=0`(離すとdownが偽に
+戻る。これが今回の主目的)**、`BOTH_SEEN=1`(同時押し)、
+`PRESSA=05`(5回タップした'a'に対しpressedもちょうど5回、自動連射による
+水増しが無いこと)、`PRESSB=01`、
+`GETCH=61,61,62,41,61,01,21`(`a,a,b,SHIFT+a=A,a,CTRL+a=0x01,SHIFT+1=!`の
+順どおり)を確認した。
+
+**故障注入**: `tests/p98_broken_norelease.c`(割り込みハンドラの「離した」処理
+だけを削除した版)で同じ`probe_key.c`をビルドし直すと、`DOWNA_END=1`のまま
+(離しても`p98_key_down()`が真に戻らない)になることを確認した。
+
+**p98_quit後もDOSが生きていること**: `probe_key`実行後に`VER`コマンドを
+実行し、プロンプトが正常に返る(ハングしていない)ことを確認した。
+ベクタ/PICマスクの復元漏れがあれば、この時点でDOSがハングする想定。
+
+**未確認**:
+- 記号のSHIFT変換は、wikiが実測で明記している`0x33`→`_`と、今回追加で
+  確認した`SHIFT+1`→`!`以外は一般的なJIS配列の知識による最善努力実装で、
+  実測していない。
+- CAPS/かなロックのBIOS側インジケータとの整合(p98libの内部トグルと
+  実際のBIOS状態がずれる可能性)は未調査。
+- キーリピート(500ms以上ホールドした場合の追加割り込み)との相互作用は
+  検証していない(500ms未満のホールドでのみ検証)。
+- 実機での確認は行っていない。
+
 ## 未実施(スコープ外)
 
-- キーボード・スプライト: 今回実装していないため検証もしていない
+- スプライト: 今回実装していないため検証もしていない
   (`docs/design.md`のAPI設計のみ)。
 - 実機での確認: 全てnp2kai上の実測であり、実機PC-98での動作は未確認。
