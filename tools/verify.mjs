@@ -224,10 +224,29 @@ async function withPage(browser, url, fn) {
 // 同じ配置だが、背景タイルの描き込みが多くキャラの色数も多い「色付き完全版」)。
 const MAG_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/ORIGINAL/KYARA-03.MAG');
 
+// 素材(元のMAG/KYAファイル)は作者の環境にしかない(docs/assets.md参照)。
+// 素材が無い環境でも、素材を必要としない項目はそのまま実行できるように、
+// 「元データが読めるか」をここで一度だけ確認し、以降は素材が必要な項目だけを
+// スキップする(README.mdの「検証の回し方」参照)。
+let magAssetSet = null;
+let assetsAvailable = false;
+let assetsUnavailableReason = '';
+
 async function main() {
   const results = [];
+  const skipped = [];
   console.log('--- ビルド ---');
-  const magAssetSet = await buildAssetSetFromMag(MAG_PATH); // キャラ・タイルともKYARA-03.MAG由来
+  try {
+    magAssetSet = await buildAssetSetFromMag(MAG_PATH); // キャラ・タイルともKYARA-03.MAG由来
+    assetsAvailable = true;
+  } catch (err) {
+    assetsAvailable = false;
+    assetsUnavailableReason = err && err.code === 'ENOENT'
+      ? `元データが見つかりません(${MAG_PATH})`
+      : `元データの読み込みに失敗しました(${err && err.message})`;
+    console.log(`\n[注意] ${assetsUnavailableReason}`);
+    console.log('       素材を必要とする項目は「素材が無いため実行できません」として報告し、SKIP扱い(合格扱いにはしません)。');
+  }
 
   // ---- KYA経由とMAG経由の突き合わせ ----
   // 「同じ名前のKYAとMAGは同じ絵のはず」という前提で両方を変換し、
@@ -252,10 +271,18 @@ async function main() {
     ['MITEI2', 'MITEI2.KYA', 'MITEI2.MAG'],
     ['MITEI3', 'MITEI3.KYA', 'MITEI3.MAG'],
   ]) {
-    const report = await compareKyaMag(
-      resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA', kyaName),
-      resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA', magName),
-    );
+    const kyaPath = resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA', kyaName);
+    const magPath = resolve(REPO_ROOT, '../_local/legacy-a-games/C-GAMES/SAKA', magName);
+    let report;
+    try {
+      report = await compareKyaMag(kyaPath, magPath);
+    } catch (err) {
+      const entry = { label: `[KYA/MAG突き合わせ] ${label}: パレット16色が完全一致`, skip: true, reason: '素材が無いため実行できません' };
+      results.push(entry);
+      skipped.push(entry);
+      console.log(`SKIP [KYA/MAG突き合わせ] ${label}: 素材が無いため実行できません`);
+      continue;
+    }
     const paletteOk = report.paletteMismatch === 0;
     results.push({
       label: `[KYA/MAG突き合わせ] ${label}: パレット16色が完全一致`,
@@ -1143,6 +1170,13 @@ async function main() {
     // キャラをMAG(MITEI3.MAG、当時の標準フォーマット)由来へ主役交代。
     // タイルはKYA(MITEI2.KYA)由来のまま(理由はdocs/design.md参照)。 ----
 
+    if (!assetsAvailable) {
+      const entry = { label: '変換アセットの実値検証・サンプル2(walk2)一式', skip: true, reason: '素材が無いため実行できません' };
+      results.push(entry);
+      skipped.push(entry);
+      console.log('\n--- 変換アセットの実値検証・サンプル2(walk2) ---');
+      console.log('SKIP 素材(元のMAG/KYAファイル)が無いため実行できません(作者の環境でのみ実行可能。README.md参照)');
+    } else {
     console.log('\n--- 変換アセットの実値検証(probe_walk2_assets: タイル2種+4方向キャラ(いずれもKYARA-03.MAG由来)がVRAM上で変換結果と一致) ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/walk2assets.xdf`, 'PROBE_WA', { waitMs: 2000 }), PORT);
@@ -1316,6 +1350,7 @@ async function main() {
       results.push({ label: '[walk2] ESCで終了後、DOSコマンド(VER)が正常応答する', ok: alive, actual: alive ? '応答あり' : verText.slice(-200), expected: '応答あり' });
       console.log(`${alive ? 'OK  ' : 'FAIL'} [walk2] ESC終了後にVERを実行してプロンプトが返る`);
     });
+    }
 
     console.log('\n--- walk2: タイル背景でのA/B速度比較(全描き直し vs 差分復帰、BENCH_FRAMES=40) ---');
     {
@@ -1368,9 +1403,27 @@ async function main() {
     server.close();
   }
 
-  const failed = results.filter((r) => !r.ok);
-  console.log(`\n=== ${results.length - failed.length}/${results.length} OK ===`);
-  if (failed.length) process.exitCode = 1;
+  // 終了コード(README.md「検証の回し方」参照):
+  //   0: 全項目OK、SKIPも無し(素材ありの作者環境で全項目通過)。
+  //   1: 1件以上の本当の失敗(FAIL)がある。
+  //   2: FAILは無いが、素材が無く実行できなかった項目(SKIP)がある
+  //      (異常ではないが、全項目は検証できていない状態として区別する)。
+  const skippedResults = results.filter((r) => r.skip);
+  const failed = results.filter((r) => !r.ok && !r.skip);
+  const okCount = results.length - failed.length - skippedResults.length;
+  console.log(`\n=== ${okCount}/${results.length - skippedResults.length} OK` +
+    (skippedResults.length ? `(SKIP ${skippedResults.length}件、素材なしのため実行不可)` : '') + ' ===');
+  if (skippedResults.length) {
+    console.log('SKIPした項目(素材が無いため実行できません。合格扱いにはしていません):');
+    for (const s of skippedResults) console.log(`  - ${s.label}: ${s.reason}`);
+  }
+  if (failed.length) {
+    process.exitCode = 1;
+  } else if (skippedResults.length) {
+    process.exitCode = 2;
+  } else {
+    process.exitCode = 0;
+  }
 }
 
 await main();

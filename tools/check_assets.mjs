@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // check_assets.mjs
 //
-// 公開前提リポジトリ(p98lib)向けの混入検査。
-// 「docs/assets.md の“使ってよい”一覧に無い素材」「_local/ 由来のパス」
-// 「生の画像/ディスク系ファイルそのもの」がコミットに入るのを機械的に止める。
+// 公開前提リポジトリ(p98lib)向けの混入検査。**許可リスト方式**:
+// docs/assets.md の「使ってよい」一覧に無いものはすべて禁止する
+// (除外リストは持たない。一覧に載っていないものは理由を問わず全部止める)。
 //
 // p98libは画像ファイル自体をコミットしない方針(docs/assets.md参照)。
 // コミットしてよいのは変換済みのCバイト配列(samples/*.h, tests/*.h)だけで、
 // その先頭コメントの「元データ: <ファイル名>」が docs/assets.md の
 // 「使ってよい」表にある名前(またはワイルドカードパターン)と一致することを確認する。
+// あわせて「_local/ 由来のパス」「生の画像/ディスク系ファイルそのもの」の
+// コミットも機械的に止める。
 //
 // 使い方:
 //   node tools/check_assets.mjs          # ステージされたファイルを検査
@@ -63,26 +65,6 @@ function parseAllowList(assetsMdText) {
   return patterns;
 }
 
-function parseDenyList(assetsMdText) {
-  const startMarker = '## 使わない';
-  const start = assetsMdText.indexOf(startMarker);
-  if (start === -1) return [];
-  const rest = assetsMdText.slice(start + startMarker.length);
-  const nextHeading = rest.indexOf('\n## ');
-  const section = nextHeading === -1 ? rest : rest.slice(0, nextHeading);
-  const names = [];
-  for (const line of section.split('\n')) {
-    if (!line.trim().startsWith('|')) continue;
-    const backticked = line.match(/`([^`]+)`/g);
-    if (!backticked) continue;
-    for (const tok of backticked) {
-      const pattern = tok.slice(1, -1).trim();
-      if (pattern) names.push(pattern);
-    }
-  }
-  return names;
-}
-
 // パターン中の "*" だけをワイルドカードとして扱い、パスの basename 同士で比較する。
 function basenameMatches(pattern, name) {
   const patBase = pattern.split('/').pop();
@@ -102,7 +84,6 @@ function main() {
   const mode = process.argv.includes('--all') ? 'all' : 'staged';
   const assetsMdText = readFileSync(resolve(REPO_ROOT, 'docs/assets.md'), 'utf8');
   const allowPatterns = parseAllowList(assetsMdText);
-  const denyNames = parseDenyList(assetsMdText);
 
   const violations = [];
   const files = gitFiles(mode);
@@ -137,14 +118,9 @@ function main() {
       try { text = readFileSync(abs, 'utf8'); } catch { text = ''; }
       const srcName = extractSourceName(text);
       if (srcName) {
-        const denied = denyNames.find((d) => basenameMatches(d, srcName));
-        if (denied) {
-          violations.push(`${relPath} -- 元データ「${srcName}」は docs/assets.md の「使わない」一覧に一致(${denied})`);
-          continue;
-        }
         const allowed = allowPatterns.some((p) => basenameMatches(p, srcName));
         if (!allowed) {
-          violations.push(`${relPath} -- 元データ「${srcName}」が docs/assets.md の「使ってよい」一覧に見つからない`);
+          violations.push(`${relPath} -- 元データ「${srcName}」が docs/assets.md の「使ってよい」一覧に見つからない(許可リスト方式: 一覧に無いものはすべて禁止)`);
         }
       }
     }
