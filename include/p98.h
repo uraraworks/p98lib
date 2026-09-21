@@ -226,4 +226,81 @@ void p98_set_draw_target(p98_draw_target_t target);
  */
 void p98_draw_sprite_diff(const p98_sprite_t *spr, int x, int y);
 
+/* ---- EGCによる本来のスプライト転送(2026-09後半、docs/design.md参照) ----
+ *
+ * p98_draw_sprite()/p98_draw_sprite_diff()は1バイト単位のCPU read-modify-write
+ * (p98__blend_bits)で合成しており、EGCはP98_SPRITE_EGCバックエンドの
+ * 「4プレーンとも同一バイトになる場合だけ」の部分最適化に留まっていた。
+ * こちらはEGCのシフトレジスタ(sft)とラスタ演算(ope)、および転送長(leng)を
+ * 本来の使い方(1行=1回のワード転送で4プレーンへ同時に反映)で使う経路で、
+ * 実測で確認した以下の性質を前提にしている:
+ *   - leng(0x4AE)は「合計ドット予算」として働き、シフトで先頭(dstbitぶん)・
+ *     末尾(予算超過ぶん)にはみ出す分は書き込み先の元の値が保護される。
+ *   - opeの下位8bitはラスタ演算(転送元そのまま=0xF0/AND=0xC0/OR=0xFC)、
+ *     bit11(0x0800)を足すとシフトモードになる。
+ *   - 2パス(マスクAND→絵OR)の間はope/sft/lengの再設定だけで済み、
+ *     EGC自体(ポート0x7C)を無効化してはいけない(実測で確認済み)。
+ *
+ * 置き場: 各プレーンの表示に使われない余り(オフセット32000〜32767、
+ * 768バイト)へ、あらかじめ「絵」と(透明ドットがあれば)「反転マスク」を
+ * ページ0・ページ1の両方へ書き込んでおく(EGCの転送元は必ずVRAM上に
+ * 無ければならないため)。この768バイトという容量の制約上、
+ *   - 幅は16の倍数であること(ceil不要にして行ごとのワード数を単純にするため)。
+ *   - 確保は単純なバンプ割り当てで、個別解放はできない
+ *     (p98_vram_reset()で先頭へ戻すことだけできる)。
+ * 横方向にスプライトが画面端からはみ出す座標(x<0またはx+w>640)は、
+ * このバンプ置き場の転送経路では対応しない(CPU経路のp98_draw_sprite()へ
+ * 自動でフォールバックし、結果がCPU経路と一致することを優先する)。
+ * p98_flip()(表裏入れ替え)とも、背景ページ+差分復帰方式とも併用できる
+ * (アップロード時に両ページへ書いてあるため、どちらの描画ページに
+ * 描いてもEGCの転送元は必ず揃っている)。
+ */
+#define P98_VRAM_STORE_OFF  32000
+#define P98_VRAM_STORE_SIZE 768
+
+typedef struct {
+    const p98_sprite_t *src;  /* 横方向クリップ時にCPU経路へ戻すため保持 */
+    int w, h;
+    int words;                /* 1行のワード数 = w/16 */
+    unsigned pixOff;          /* 絵の先頭オフセット(P98_VRAM_STORE_OFFからの相対) */
+    unsigned maskOff;         /* 反転マスクの先頭(opaque時は未使用) */
+    unsigned char opaque;     /* 1=全ドット不透明(マスクを使わない) */
+} p98_vram_sprite_t;
+
+/* VRAM置き場のバンプ割り当てを先頭(0)へ戻す。p98_vram_upload()を何度も
+ * 呼び直して使い回すプログラムの起動時、あるいはシーン切り替え時に呼ぶ。
+ * 既にp98_draw_sprite_vram()等で使っているp98_vram_sprite_tは、
+ * これを呼んだ後は無効になる(再アップロードするまで使わないこと)。 */
+void p98_vram_reset(void);
+
+/* sprをEGC転送用にVRAMの余り(768バイト/プレーン)へアップロードし、
+ * outへ結果を書く。
+ * 戻り値: 0=成功、-1=幅が16の倍数でない、-2=置き場の容量不足。
+ * 失敗時はoutの内容を保証しない。 */
+int p98_vram_upload(const p98_sprite_t *spr, p98_vram_sprite_t *out);
+
+/* 既にp98_vram_upload()で確保済みのvsの領域(同じw/h/opaque)へ、
+ * 別のspr(コマ替え後の絵)を上書きアップロードする。アニメーションの
+ * コマ送りで毎回p98_vram_upload()を呼んで置き場を消費しないための経路。
+ * w/h/opaque(全ドット不透明かどうか)のいずれかが一致しなければ-1、
+ * 成功時は0。 */
+int p98_vram_reupload(p98_vram_sprite_t *vs, const p98_sprite_t *spr);
+
+/* p98_vram_upload()がこの先あと何バイト確保できるか(1プレーンあたり、
+ * 768バイトの残量)。 */
+int p98_vram_free_bytes(void);
+
+/* vsをEGC経由で描画ページの(x,y)へ描く。x<0またはx+vs->w>640(横方向に
+ * 画面端をはみ出す)場合はp98_draw_sprite(vs->src, x, y)へフォールバックする
+ * (vs->srcがNULLなら何もしない)。縦方向は行ごとにクリップする
+ * (画面外の行は読み書きとも行わない)。 */
+void p98_draw_sprite_vram(const p98_vram_sprite_t *vs, int x, int y);
+
+/* p98_draw_sprite_diff()のEGC版。作りは全く同じ(背景ページから前回の
+ * 矩形を復元してから描き、今回の矩形を記録する)で、描画部分だけ
+ * p98_draw_sprite_vram()を使う。差分矩形の状態はp98_draw_sprite_diff()と
+ * 共有する。P98_RENDER_BGPAGEモードでない場合はp98_draw_sprite_vram()へ
+ * フォールバックする。 */
+void p98_draw_sprite_vram_diff(const p98_vram_sprite_t *vs, int x, int y);
+
 #endif /* P98_H */

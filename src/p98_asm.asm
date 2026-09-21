@@ -66,3 +66,62 @@ _p98__blend_bits:
     mov     [es:bx], al
     o32 leave
     retf
+
+; p98__egc_row(seg, srcOff, dstOff, wordCount) : void
+;   EGC有効中に呼ぶ想定。seg:srcOff から seg:dstOff へ wordCount ワードを
+;   rep movsw で転送する(「転送元をワードで読む→書き込み先へワードで書く」の
+;   対を1行ぶんまとめて行うプリミティブ、src/p98.c の p98_draw_sprite_vram 参照)。
+;   読み・書きとも同じセグメント(同一プレーンのVRAM。転送元はオフセット
+;   32000以降の余り、転送先は通常の画面オフセット)なので引数は1つでよい。
+;   引数は他のプリミティブと同じ4バイトスロット([bp+8]=seg, [bp+12]=srcOff,
+;   [bp+16]=dstOff, [bp+20]=wordCount)。
+    global _p98__egc_row
+_p98__egc_row:
+    push    ebp
+    movzx   ebp, sp
+    push    ds
+    mov     ax, [bp+8]      ; seg
+    mov     ds, ax
+    mov     es, ax
+    mov     si, [bp+12]     ; srcOff
+    mov     di, [bp+16]     ; dstOff
+    mov     cx, [bp+20]     ; wordCount
+    cld
+    rep     movsw
+    pop     ds
+    o32 leave
+    retf
+
+; p98__copy_far_to_vram(seg, dstOff, srcPtr, byteCount) : void
+;   huge modelのfarポインタsrcPtrから seg:dstOff (VRAM) へ byteCount バイトを
+;   rep movsbでコピーする(p98_vram_upload()の絵/マスクアップロード用。
+;   普通のCPU書き込みでEGCは使わない)。
+;   srcPtrはCの引数としては4バイトスロット1個そのものが「オフセット16bit+
+;   セグメント16bit」の実体になっている(x86のfarポインタのメモリ上表現と
+;   同じ並び)ので、lds si,[bp+16] で直接ds:siへ読み込める。
+;   ds:si をそのまま使うと、その後 mov ax,[bp+8] 等でdsを書き換えるため、
+;   65536バイト境界をまたぐfarポインタ対策として ds:si を「正規化」
+;   (si>>4をセグメントへ足し込み、siは下位4bitだけ残す)してから使う
+;   (このライブラリの他のfarポインタ越しコピーが無いため今回新規に採用。
+;   通常のrep movsbはセグメント境界をまたげないためこの正規化が必要)。
+    global _p98__copy_far_to_vram
+_p98__copy_far_to_vram:
+    push    ebp
+    movzx   ebp, sp
+    push    ds
+    lds     si, [bp+16]     ; ds:si = srcPtr (far pointer: offset,segment の並び)
+    mov     ax, si
+    shr     ax, 4
+    mov     bx, ds
+    add     bx, ax
+    mov     ds, bx
+    and     si, 15
+    mov     ax, [bp+8]      ; dst seg
+    mov     es, ax
+    mov     di, [bp+12]     ; dstOff
+    mov     cx, [bp+20]     ; byteCount
+    cld
+    rep     movsb
+    pop     ds
+    o32 leave
+    retf

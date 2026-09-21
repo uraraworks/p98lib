@@ -312,10 +312,12 @@ async function main() {
     fillExe, flipExe, stateExe, fillBrokenExe, keyExe, keyBrokenExe,
     spriteExe, spriteNoMaskExe, spriteNoClipExe, spriteBenchExe, spriteBench0Exe,
     spriteEgcExe, spriteEgcBrokenExe, spriteBenchEgcExe,
+    spriteVramExe, spriteVramBrokenExe, spriteBenchVramExe,
     walkExe, walkBrokenExe,
     bgpageExe, bgpageBrokenExe, bgpageBenchFullExe, bgpageBenchDiffExe, bgpageBench0BgExe,
     walk2AssetsExe, walk2AssetsBrokenExe, walk2Exe,
     walk2BenchFullExe, walk2BenchDiffExe, walk2Bench0BgExe,
+    tilebgBenchCpuExe, tilebgBenchVramExe, tilebgBench0Exe,
     stateCursorBrokenExe, cursorExe, cursorBrokenExe,
     fkeyExe, fkeyBrokenExe,
   ] = await Promise.all([
@@ -333,6 +335,9 @@ async function main() {
     buildOrThrow('tests/probe_sprite_egc.c'),
     buildOrThrow('tests/probe_sprite_egc.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_egc_noplane.c') }),
     buildOrThrow('tests/probe_sprite_bench_egc.c'),
+    buildOrThrow('tests/probe_sprite_vram.c'),
+    buildOrThrow('tests/probe_sprite_vram.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_vram_noand.c') }),
+    buildOrThrow('tests/probe_sprite_bench_vram.c'),
     buildOrThrow('samples/walk.c'),
     buildOrThrow('tests/walk_broken_nobg.c'),
     buildOrThrow('tests/probe_bgpage.c'),
@@ -346,13 +351,16 @@ async function main() {
     buildOrThrow('tests/probe_walk2_bench_full.c'),
     buildOrThrow('tests/probe_walk2_bench_diff.c'),
     buildOrThrow('tests/probe_walk2_bench0_bg.c'),
+    buildOrThrow('tests/probe_tilebg_bench_cpu.c'),
+    buildOrThrow('tests/probe_tilebg_bench_vram.c'),
+    buildOrThrow('tests/probe_tilebg_bench0.c'),
     buildOrThrow('tests/probe_state.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_cursor_noshow.c') }),
     buildOrThrow('tests/probe_cursor.c'),
     buildOrThrow('tests/probe_cursor.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_cursor_noshow.c') }),
     buildOrThrow('tests/probe_fkey.c'),
     buildOrThrow('tests/probe_fkey.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_fkey_noshow.c') }),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_state(故障注入=カーソル復帰無し)');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / probe_sprite_vram / probe_sprite_vram(故障注入=AND転送無し) / probe_sprite_bench_vram / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_tilebg_bench_cpu / probe_tilebg_bench_vram / probe_tilebg_bench0 / probe_state(故障注入=カーソル復帰無し)');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -371,6 +379,9 @@ async function main() {
     spriteegc: programFdFor(spriteEgcExe, 'PROBE_SP'),
     spriteegcbroken: programFdFor(spriteEgcBrokenExe, 'PROBE_SP'),
     spritebenchegc: programFdFor(spriteBenchEgcExe, 'PROBE_SE'),
+    spritevram: programFdFor(spriteVramExe, 'PROBE_SV'),
+    spritevrambroken: programFdFor(spriteVramBrokenExe, 'PROBE_SV'),
+    spritebenchvram: programFdFor(spriteBenchVramExe, 'PROBE_SR'),
     bgpage: programFdFor(bgpageExe, 'PROBE_BG'),
     bgpagebroken: programFdFor(bgpageBrokenExe, 'PROBE_BG'),
     bgpagebenchfull: programFdFor(bgpageBenchFullExe, 'PROBE_BF'),
@@ -387,6 +398,9 @@ async function main() {
     walk2benchfull: programFdFor(walk2BenchFullExe, 'PROBE_W1'),
     walk2benchdiff: programFdFor(walk2BenchDiffExe, 'PROBE_W2'),
     walk2bench0bg: programFdFor(walk2Bench0BgExe, 'PROBE_W3'),
+    tilebgbenchcpu: programFdFor(tilebgBenchCpuExe, 'PROBE_TC'),
+    tilebgbenchvram: programFdFor(tilebgBenchVramExe, 'PROBE_TV'),
+    tilebgbench0: programFdFor(tilebgBench0Exe, 'PROBE_T0'),
   };
 
   const server = await startServer(programFds);
@@ -811,6 +825,102 @@ async function main() {
       console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(EGC WMレジスタ誤り) Bplane byte13 actual=[${bytesToHex(mem)}] (正常なら0xFFのはず)`);
     });
 
+    // p98_vram_upload()/p98_draw_sprite_vram()(VRAM常駐+EGC転送経路)と
+    // p98_draw_sprite()(CPU経路)の等価性。tests/probe_sprite_vram.cの
+    // レイアウト(座標はそのファイル冒頭のコメントと完全に一致させてある)。
+    // 単なる絶対値比較ではなく「CPU経路の帯とVRAM経路の帯のバイト列が
+    // 完全一致すること」を見る。加えて、両方とも「何も描いていない背景
+    // そのまま」で一致してしまう(陽性対照が無いと検出できないFAIL)を
+    // 防ぐため、CPU側の帯が背景そのままでないことも別途確認する。
+    const VRAM_BG_BYTE = [0xFF, 0x00, 0x00, 0xFF]; // B,R,G,I (probe側BG_COLOR=9=B+I)
+    function countNonBackgroundBytes(rect) {
+      let n = 0;
+      for (let p = 0; p < 4; p++) {
+        for (const b of rect.planes[p]) if (b !== VRAM_BG_BYTE[p]) n++;
+      }
+      return n;
+    }
+    async function compareCpuEgc(page, results, label, xCpu, yCpu, xEgc, yEgc, wBits, h) {
+      const cpu = await readVramRect(page, xCpu, yCpu, wBits, h);
+      const egc = await readVramRect(page, xEgc, yEgc, wBits, h);
+      const eq = rectPlanesEqual(cpu, egc);
+      results.push({ label, ok: eq, actual: eq ? '一致' : '不一致(バイト列相違)', expected: '一致' });
+      console.log(`${eq ? 'OK  ' : 'FAIL'} ${label}`);
+      return { eq, cpu, egc };
+    }
+
+    console.log('\n--- スプライト・VRAM常駐+EGC転送経路 (probe_sprite_vram: CPU経路との等価性の確認) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spritevram.xdf`, 'PROBE_SV', { waitMs: 4000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+
+      // ブロックA: SPR_A(16x16、全ドット不透明)、dx=0..15、8列x2行、列間隔48。
+      // words=1なので読み取り幅は(1+1)*16=32bit(shift分の溢れも含めて安全に読む)。
+      let aDiffTotal = 0;
+      for (let dx = 0; dx < 16; dx++) {
+        const col = dx % 8, row = Math.floor(dx / 8);
+        const x0 = 16 + col * 48;
+        const r = await compareCpuEgc(page, results, `[VRAM] ブロックA dx=${dx}: CPU経路とVRAM経路が一致`,
+          x0, 8 + row * 20, x0, 56 + row * 20, 32, 16);
+        aDiffTotal += countNonBackgroundBytes(r.cpu);
+      }
+      results.push({ label: '[VRAM] ブロックA: 陽性対照(CPU側の帯は背景そのままではない)', ok: aDiffTotal > 20, actual: `背景と異なるバイト数=${aDiffTotal}`, expected: '20を超えるはず' });
+      console.log(`${aDiffTotal > 20 ? 'OK  ' : 'FAIL'} [VRAM] ブロックA 陽性対照 (背景と異なるバイト数=${aDiffTotal})`);
+
+      // ブロックB: SPR_B(32x32、透明ドット・左右端の穴あり)、dx=0..15、8列x2行、列間隔64。
+      // words=2なので読み取り幅は(2+1)*16=48bit。透明ドットの絵ビットに1を
+      // 混ぜてあるため、修正1(絵をmaskとANDしてからVRAMへ書く)が効いて
+      // いないとここでCPU経路とずれるはず。
+      let bDiffTotal = 0;
+      for (let dx = 0; dx < 16; dx++) {
+        const col = dx % 8, row = Math.floor(dx / 8);
+        const x0 = 16 + col * 64;
+        const r = await compareCpuEgc(page, results, `[VRAM] ブロックB dx=${dx}: CPU経路とVRAM経路が一致(透明ドットの扱い含む)`,
+          x0, 104 + row * 36, x0, 184 + row * 36, 48, 32);
+        bDiffTotal += countNonBackgroundBytes(r.cpu);
+      }
+      results.push({ label: '[VRAM] ブロックB: 陽性対照(CPU側の帯は背景そのままではない)', ok: bDiffTotal > 20, actual: `背景と異なるバイト数=${bDiffTotal}`, expected: '20を超えるはず' });
+      console.log(`${bDiffTotal > 20 ? 'OK  ' : 'FAIL'} [VRAM] ブロックB 陽性対照 (背景と異なるバイト数=${bDiffTotal})`);
+
+      // 端: xが負(-5,264/-5,284) / 右端はみ出し(632,264/632,284)。どちらも
+      // p98_draw_sprite_vram()内部でp98_draw_sprite()へフォールバックする
+      // はずなので、画面全幅(80バイト)を読んで一致することを確認する。
+      await compareCpuEgc(page, results, '[VRAM] 端: xが負/右端はみ出し(フォールバック)がCPU経路と一致', 0, 264, 0, 284, 640, 16);
+
+      // 再アップロード確認: p98_vram_reupload()で置き直した後のSPR_B。
+      const reup = await compareCpuEgc(page, results, '[VRAM] 再アップロード後もCPU経路と一致', 16, 308, 16, 344, 48, 32);
+      results.push({ label: '[VRAM] 再アップロード: 陽性対照(CPU側の帯は背景そのままではない)', ok: countNonBackgroundBytes(reup.cpu) > 20, actual: `背景と異なるバイト数=${countNonBackgroundBytes(reup.cpu)}`, expected: '20を超えるはず' });
+      console.log(`${countNonBackgroundBytes(reup.cpu) > 20 ? 'OK  ' : 'FAIL'} [VRAM] 再アップロード 陽性対照`);
+
+      // 端: yが上下にはみ出す位置。X=560(CPU)/608(EGC、dx=0固定なのでどちらもshift無し)。
+      // 上端(y=-5)は可視行のみ(0..26=27行)、下端(y=392)は可視行のみ(392..399=8行)を読む。
+      // 読み取り幅はwords*16=32bit(4バイト)のみ(dx=0でシフトの溢れが無いため)。
+      // (words+1)*16(=48bit)で読むと、X=608側はbyteOff=76+6=82となり1行=80バイトの
+      // 境界を超えて次行の先頭2バイトを誤って読んでしまう(実際に検証時にFALSE FAILを
+      // 起こした。docs/verify-log.md相当の教訓。ここでは同じ罠を踏まないよう32bitに絞る)。
+      await compareCpuEgc(page, results, '[VRAM] 端: 上端はみ出しがCPU経路と一致', 560, 0, 608, 0, 32, 27);
+      await compareCpuEgc(page, results, '[VRAM] 端: 下端はみ出しがCPU経路と一致', 560, 392, 608, 392, 32, 8);
+    });
+
+    console.log('\n--- 故障注入: probe_sprite_vram(AND転送無し版)はFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spritevrambroken.xdf`, 'PROBE_SV', { waitMs: 4000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+      // ブロックB dx=0(透明ドットを含むSPR_B)で比較する。パス1(AND転送)を
+      // 丸ごとスキップしているので、透明ドットの位置で背景が0にならず、
+      // パス2のOR転送で絵のビット(全部1)がそのまま乗ってしまい、
+      // CPU経路の結果(背景が透明ドットの位置に残る)とずれるはず。
+      const cpu = await readVramRect(page, 16, 104, 48, 32);
+      const egc = await readVramRect(page, 16, 184, 48, 32);
+      const eq = rectPlanesEqual(cpu, egc);
+      const brokenDetected = !eq;
+      results.push({
+        label: '故障注入(VRAM AND転送無し)はブロックB dx=0でCPU経路とVRAM経路が一致しない(透明ドットの位置で背景にゴミが乗る)',
+        ok: brokenDetected, actual: eq ? '一致(検出できず)' : '不一致(検出できた)', expected: '不一致のはず',
+      });
+      console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(VRAM AND転送無し) ブロックB dx=0 actual=${eq ? '一致' : '不一致'}`);
+    });
+
     console.log('\n--- 故障注入: probe_sprite(マスク無し版)はFAILするはず ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spritenomask.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
@@ -859,23 +969,61 @@ async function main() {
     const baseMs = await measureRunTimes('spritebench0', 'PROBE_S0');
     const cpuMs = await measureRunTimes('spritebench', 'PROBE_SB');
     const egcMs = await measureRunTimes('spritebenchegc', 'PROBE_SE');
+    const vramMs = await measureRunTimes('spritebenchvram', 'PROBE_SR');
 
     {
       const cpuPerSpriteMs = (cpuMs - baseMs) / SPRITE_BENCH_N;
       const egcPerSpriteMs = (egcMs - baseMs) / SPRITE_BENCH_N;
+      const vramPerSpriteMs = (vramMs - baseMs) / SPRITE_BENCH_N;
       const cpuPerSec = cpuPerSpriteMs > 0 ? 1000 / cpuPerSpriteMs : Infinity;
       const egcPerSec = egcPerSpriteMs > 0 ? 1000 / egcPerSpriteMs : Infinity;
-      console.log(`中央値: baseline=${baseMs.toFixed(0)}ms, CPU経路${SPRITE_BENCH_N}本=${cpuMs.toFixed(0)}ms, EGC経路${SPRITE_BENCH_N}本=${egcMs.toFixed(0)}ms`);
+      const vramPerSec = vramPerSpriteMs > 0 ? 1000 / vramPerSpriteMs : Infinity;
+      console.log(`中央値: baseline=${baseMs.toFixed(0)}ms, CPU経路${SPRITE_BENCH_N}本=${cpuMs.toFixed(0)}ms, EGC経路(部分最適化)${SPRITE_BENCH_N}本=${egcMs.toFixed(0)}ms, VRAM置き場経路(EGC本転送)${SPRITE_BENCH_N}本=${vramMs.toFixed(0)}ms`);
       console.log(`CPU経路: 1体あたり約${cpuPerSpriteMs.toFixed(3)}ms ≈ 約${cpuPerSec.toFixed(0)}体/秒`);
-      console.log(`EGC経路: 1体あたり約${egcPerSpriteMs.toFixed(3)}ms ≈ 約${egcPerSec.toFixed(0)}体/秒`);
-      console.log(`比(EGC/CPU): ${(egcPerSec / cpuPerSec).toFixed(2)}倍`);
+      console.log(`EGC経路(部分最適化): 1体あたり約${egcPerSpriteMs.toFixed(3)}ms ≈ 約${egcPerSec.toFixed(0)}体/秒`);
+      console.log(`VRAM置き場経路(EGC本転送、p98_draw_sprite_vram): 1体あたり約${vramPerSpriteMs.toFixed(3)}ms ≈ 約${vramPerSec.toFixed(0)}体/秒`);
+      console.log(`比(EGC/CPU): ${(egcPerSec / cpuPerSec).toFixed(2)}倍, 比(VRAM/CPU): ${(vramPerSec / cpuPerSec).toFixed(2)}倍`);
       console.log('注意: これはnp2kai(WebNP2)のEGCエミュレーション実装+puppeteerというこの実行環境全体を通した相対値であり、実機での比率とは限らない(エミュレータがEGCを実機より速く/遅く実装している可能性があるため)。定性的な結論(速い/変わらない/遅い)のみ採る。');
-      const ok = Number.isFinite(cpuPerSpriteMs) && cpuPerSpriteMs > 0 && Number.isFinite(egcPerSpriteMs) && egcPerSpriteMs > 0;
+      const ok = Number.isFinite(cpuPerSpriteMs) && cpuPerSpriteMs > 0 && Number.isFinite(egcPerSpriteMs) && egcPerSpriteMs > 0 && Number.isFinite(vramPerSpriteMs) && vramPerSpriteMs > 0;
       results.push({
         label: 'スプライト速度のA/B比較が完了(具体的な数値・比率は合否判定の対象ではない。docs/verify-log.md参照)',
-        ok, actual: `CPU約${cpuPerSec.toFixed(0)}体/秒, EGC約${egcPerSec.toFixed(0)}体/秒`, expected: '両方とも正の値が計測できていること',
+        ok, actual: `CPU約${cpuPerSec.toFixed(0)}体/秒, EGC約${egcPerSec.toFixed(0)}体/秒, VRAM置き場約${vramPerSec.toFixed(0)}体/秒`, expected: '3つとも正の値が計測できていること',
       });
       console.log(ok ? 'OK   スプライト速度のA/B比較が完了' : 'FAIL スプライト速度のA/B比較に失敗(差分が0以下)');
+    }
+
+    console.log('\n--- 陽性対照: スプライト速度ベンチ(VRAM経路)が実際に描画していることの確認 ---');
+    {
+      // 上のA/B比較はホスト側performance.now()の差分だけを見ており、
+      // 「実は描いていないから速い」(VRAM経路が実際には何も転送せず
+      // 単に速いだけ)を検出できない。最後に描くスプライトの座標
+      // (iter=BENCH_ITERS-1=49, i=BENCH_N-1=39)を、tests/probe_sprite_bench*.c
+      // と同じ式 x=(iter*7+i*37)%620, y=(iter*3+i*11)%380 でそのまま計算すると
+      // x=546,y=196。x=546はバイト境界(8の倍数)ではないため、切り下げた
+      // 544を起点にシフトぶんを含め32bit(4バイト)読めば16x16スプライト
+      // 全体(544..575の範囲)が収まる。
+      const SX = 544, SY = 196, SW = 32, SH = 16;
+      async function readAfterRun(program, stem) {
+        let rect;
+        await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+          await page.evaluate((port, prog, s) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/${prog}.xdf`, s, { waitForExit: true }), PORT, program, stem);
+          if (errors.length) console.log(`page errors(${program}):`, errors);
+          rect = await readVramRect(page, SX, SY, SW, SH);
+        });
+        return rect;
+      }
+
+      const blank = await readAfterRun('spritebench0', 'PROBE_S0');
+      const cpu = await readAfterRun('spritebench', 'PROBE_SB');
+      const vram = await readAfterRun('spritebenchvram', 'PROBE_SR');
+
+      const cpuDiffersFromBlank = !rectPlanesEqual(cpu, blank);
+      results.push({ label: '[陽性対照] スプライト速度ベンチ: CPU経路実行後は0本描画版(背景)と一致しない(実際に描いている)', ok: cpuDiffersFromBlank, actual: cpuDiffersFromBlank ? '不一致(描画あり)' : '一致(描いていない)', expected: '不一致' });
+      console.log(`${cpuDiffersFromBlank ? 'OK  ' : 'FAIL'} [陽性対照] スプライト速度ベンチ CPU経路は背景のままではない`);
+
+      const vramMatchesCpu = rectPlanesEqual(vram, cpu);
+      results.push({ label: '[陽性対照] スプライト速度ベンチ: VRAM経路の最終描画結果がCPU経路と一致(実際に同じ絵を描いている)', ok: vramMatchesCpu, actual: vramMatchesCpu ? '一致' : '不一致', expected: '一致' });
+      console.log(`${vramMatchesCpu ? 'OK  ' : 'FAIL'} [陽性対照] スプライト速度ベンチ VRAM経路がCPU経路と一致`);
     }
 
     // walk.c / walk_broken_nobg.c は probe_*.c と違い、描画後に静止せず
@@ -1462,6 +1610,72 @@ async function main() {
         ok, actual: `全描き直し約${fullFps.toFixed(1)}fps, 差分復帰約${diffFps.toFixed(1)}fps`, expected: '両方とも正の値が計測できていること',
       });
       console.log(ok ? 'OK   walk2のA/B速度比較が完了' : 'FAIL walk2のA/B速度比較に失敗(差分が0以下)');
+    }
+
+    console.log('\n--- タイル敷き詰めのA/B速度比較(CPU経路 vs VRAM/EGC経路、40x25タイルをREPEAT=3回) ---');
+    {
+      // samples/walk2.cのdraw_tiled_background()をVRAM/EGC経路(EGC本転送、
+      // p98_vram_upload+p98_draw_sprite_vram)へ載せ替えたことの効果を、
+      // walk2本体ではなく単純なタイル敷き詰めだけを切り出して測る。
+      // 「全描き直し vs 差分復帰」(前節)とは別の軸(同じ全描き直しの中で
+      // CPU合成とEGC本転送のどちらが速いか)なので、REPEAT回数・タイル・
+      // 座標順を完全に揃えたCPU版とVRAM版だけを比較する。
+      const base0 = await measureRunTimes('tilebgbench0', 'PROBE_T0');
+      const cpuMs = await measureRunTimes('tilebgbenchcpu', 'PROBE_TC', 60000);
+      const vramMs = await measureRunTimes('tilebgbenchvram', 'PROBE_TV', 60000);
+
+      const TILEBG_REPEAT = 3; /* tests/probe_tilebg_bench_{cpu,vram}.c の REPEAT と一致させる */
+      const TILEBG_TILES = 40 * 25; /* 40x25 */
+      const cpuTotalTiles = TILEBG_REPEAT * TILEBG_TILES;
+      const cpuPerTileMs = (cpuMs - base0) / cpuTotalTiles;
+      const vramPerTileMs = (vramMs - base0) / cpuTotalTiles;
+      const cpuTps = cpuPerTileMs > 0 ? 1000 / cpuPerTileMs : Infinity;
+      const vramTps = vramPerTileMs > 0 ? 1000 / vramPerTileMs : Infinity;
+      console.log(`条件: 40x25=1000枚のタイル敷き詰めをREPEAT=${TILEBG_REPEAT}回(合計${cpuTotalTiles}枚)、同一座標順・同一タイル選択規則`);
+      console.log(`CPU経路(p98_draw_sprite): baseline=${base0.toFixed(0)}ms, 本編=${cpuMs.toFixed(0)}ms → 1枚あたり約${cpuPerTileMs.toFixed(3)}ms ≈ 約${cpuTps.toFixed(0)}枚/秒`);
+      console.log(`VRAM/EGC経路(p98_draw_sprite_vram): baseline=${base0.toFixed(0)}ms, 本編=${vramMs.toFixed(0)}ms → 1枚あたり約${vramPerTileMs.toFixed(3)}ms ≈ 約${vramTps.toFixed(0)}枚/秒`);
+      if (cpuPerTileMs > 0 && vramPerTileMs > 0) {
+        console.log(`比(CPU/VRAM): VRAM経路はCPU経路の約${(cpuPerTileMs / vramPerTileMs).toFixed(2)}倍速い(この実行環境全体を通した相対値。docs/verify-log.md参照)`);
+      }
+      console.log('注意: この実行環境(np2kai+puppeteer)込みの相対値であり、実機での比率とは限らない。定性的な結論(速い/変わらない/遅い)のみ採る。');
+      const ok = Number.isFinite(cpuPerTileMs) && cpuPerTileMs > 0 && Number.isFinite(vramPerTileMs) && vramPerTileMs > 0;
+      results.push({
+        label: 'タイル敷き詰めのA/B速度比較(CPU経路 vs VRAM/EGC経路)が完了(具体的な数値・比率は合否判定の対象ではない。docs/verify-log.md参照)',
+        ok, actual: `CPU約${cpuTps.toFixed(0)}枚/秒, VRAM約${vramTps.toFixed(0)}枚/秒`, expected: '両方とも正の値が計測できていること',
+      });
+      console.log(ok ? 'OK   タイル敷き詰めのA/B速度比較が完了' : 'FAIL タイル敷き詰めのA/B速度比較に失敗(差分が0以下)');
+    }
+
+    console.log('\n--- 陽性対照: タイル敷き詰め速度ベンチ(VRAM経路)が実際に描画していることの確認 ---');
+    {
+      // 上のA/B比較も同様にperformance.now()の差分だけなので、「実は描いて
+      // いないから速い」を検出できない。左上(0,0)のタイルは選択規則
+      // (tx+ty)%5==0によりMAG_TILE_ACCENTになる(tests/probe_tilebg_bench_vram.c
+      // 冒頭コメント参照)。タイルを1枚も敷かない版(tilebgbench0)を
+      // 「背景」として、CPU経路(tilebgbenchcpu)・VRAM経路(tilebgbenchvram)を
+      // それぞれ1回実行した後の同じ領域と比べる。
+      const SX = 0, SY = 0, SW = 16, SH = 16;
+      async function readAfterRun(program, stem) {
+        let rect;
+        await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+          await page.evaluate((port, prog, s) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/${prog}.xdf`, s, { waitForExit: true }), PORT, program, stem);
+          if (errors.length) console.log(`page errors(${program}):`, errors);
+          rect = await readVramRect(page, SX, SY, SW, SH);
+        });
+        return rect;
+      }
+
+      const blank = await readAfterRun('tilebgbench0', 'PROBE_T0');
+      const cpu = await readAfterRun('tilebgbenchcpu', 'PROBE_TC');
+      const vram = await readAfterRun('tilebgbenchvram', 'PROBE_TV');
+
+      const cpuDiffersFromBlank = !rectPlanesEqual(cpu, blank);
+      results.push({ label: '[陽性対照] タイル敷き詰め速度ベンチ: CPU経路実行後は0枚敷き版(背景)と一致しない(実際に描いている)', ok: cpuDiffersFromBlank, actual: cpuDiffersFromBlank ? '不一致(描画あり)' : '一致(描いていない)', expected: '不一致' });
+      console.log(`${cpuDiffersFromBlank ? 'OK  ' : 'FAIL'} [陽性対照] タイル敷き詰め速度ベンチ CPU経路は背景のままではない`);
+
+      const vramMatchesCpu = rectPlanesEqual(vram, cpu);
+      results.push({ label: '[陽性対照] タイル敷き詰め速度ベンチ: VRAM経路の最終描画結果がCPU経路と一致(実際に同じ絵を描いている)', ok: vramMatchesCpu, actual: vramMatchesCpu ? '一致' : '不一致', expected: '一致' });
+      console.log(`${vramMatchesCpu ? 'OK  ' : 'FAIL'} [陽性対照] タイル敷き詰め速度ベンチ VRAM経路がCPU経路と一致`);
     }
   } finally {
     await browser.close();
