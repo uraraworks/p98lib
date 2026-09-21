@@ -1409,10 +1409,10 @@ OK   [walk2] ESC終了後にVERを実行してプロンプトが返る
 
 ## 17. 公開準備一式の検証完走(2026-09-21)
 
-前節の通り、公開準備一式(README/LICENSE/CONTRIBUTING/混入検査フックの
+公開準備一式(README/LICENSE/CONTRIBUTING/混入検査フックの
 追加、`docs/assets.md`の許可リスト化、`tools/verify.mjs`の素材無し環境
-対応)を含むコミットは検証未実行のまま行っていたが、2026-09-21に改めて
-`node tools/verify.mjs` を完走させた。
+対応)を含むコミット(264d1c3)は、`node tools/verify.mjs`を完走させられない
+まま行っていたが、2026-09-21に改めて`node tools/verify.mjs` を完走させた。
 
 ```
 === 163/163 OK ===
@@ -1430,5 +1430,5 @@ OK   [walk2] ESC終了後にVERを実行してプロンプトが返る
 
 前回検証未実行のまま優先確認事項としていた、素材が無い環境でのSKIP処理
 (`assetsAvailable`まわり)と`tools/check_assets.mjs`の許可リスト方式も
-含めて通過している。README.md冒頭および本ファイル前節の「検証未実行」の
-注意書きは、この完走確認をもって削除した。
+含めて通過している。README.md冒頭の注意書きと、本ファイルにあった
+「検証未実行」の節(この節に置き換えた)は、この完走確認をもって削除した。
