@@ -11,7 +11,8 @@ import { createRequire } from 'node:module';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildProgram } from './build.mjs';
-import { buildAssetSetFromMag } from './mag_convert.mjs';
+import { buildAssetSetFromMag, extractRectFromMag } from './mag_convert.mjs';
+import { computeMask } from './kya_convert.mjs';
 import { compareKyaMag } from './compare_kya_mag.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -231,6 +232,15 @@ const MAG_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/ORIGINAL/KYARA-03.
 let magAssetSet = null;
 let assetsAvailable = false;
 let assetsUnavailableReason = '';
+// walk2検証用の「右向き」期待値: tools/mag_convert.mjsの反転ロジックを経由せず、
+// 原物MAGのcol6/col7を直接切り出して作る(素材変換と検証の期待値が同じ
+// 思い込みを共有していたために左右逆コマの不具合をすり抜けた反省から、
+// 物差しを変換ロジックから独立させてある)。mag_convert.mjs側はleftFrames=
+// [col4,col5]を反転してrightFrames=[mirror(col4),mirror(col5)]を作っており、
+// 実測でmirror(col4)==col7、mirror(col5)==col6と分かっているので、
+// 対応する添字はcol7→[0]、col6→[1]。
+let independentRightFrames = null;
+const MAG_CHAR_ROW = 0; // mag_convert.mjsのCHAR_ROWと同じ値(コメントで明示)
 
 async function main() {
   const results = [];
@@ -238,6 +248,11 @@ async function main() {
   console.log('--- ビルド ---');
   try {
     magAssetSet = await buildAssetSetFromMag(MAG_PATH); // キャラ・タイルともKYARA-03.MAG由来
+    independentRightFrames = [7, 6].map((col) => {
+      const rect = extractRectFromMag(magAssetSet.decoded, col * 32, MAG_CHAR_ROW * 32, 32, 32);
+      const mask = computeMask(rect, 0);
+      return { rect, mask };
+    });
     assetsAvailable = true;
   } catch (err) {
     assetsAvailable = false;
@@ -957,29 +972,40 @@ async function main() {
         assertEqual('[walk] 起動直後: キャラ(x=16,y=16,row0) B/R/G/Iplane', [b, r, g, i], [SHAPE[0], 0xFF, SHAPE[0], 0xFF], results);
       }
 
-      // 2) RIGHTキーを1回タップ(STEP=24px)。x=16(byte2) -> x=40(byte5)。
-      await sk(0x3C, true); await sleep(350); await sk(0x3C, false);
+      // 2) RIGHTキーは押している間ずっと移動する(p98_key_down)ため、
+      // 「N回タップ→N歩」という制御はできない(何フレーム押していたかに
+      // 移動量が依存し、検証が時間依存になってしまう)。walk2の節と同じく
+      // 「壁に当たるまで押し続ける」ことで位置を確定させる。壁に当たった後は
+      // 動かなくなるので、HOLD_MSを実際に必要な時間より十分長く取っても
+      // 安全(壊れない)。
+      // 壁の位置(cx + STEP <= SCREEN_W - CHAR_W = 632を満たす最大値)を検算する:
+      // cx=16から24ずつ増やすと 16,40,64,...,592,616 となり、616+24=640>632で
+      // 止まるため、右端はx=616(8の倍数なのでbyte境界、616/8=77)に確定する。
+      const HOLD_MS = 10000;
+      const NEW_X = 616, NEW_BYTE = 77; // 検算: 16 + 24*25 = 616、616+24=640は632を超えるため止まる
+      await sk(0x3C, true); await sleep(HOLD_MS); await sk(0x3C, false);
       await sleep(1500);
 
       {
-        // 新しい位置(byte5)と元の位置(byte2)を同じスナップショットでまとめて読む。
+        // 新しい位置(byte77)と元の位置(byte2)を同じスナップショットでまとめて読む。
         const snap = await readManyStable(page, [
-          [addr('B', 0, 5), 1], [addr('G', 0, 5), 1],
+          [addr('B', 0, NEW_BYTE), 1], [addr('G', 0, NEW_BYTE), 1],
           [addr('B', 0, 2), 1], [addr('R', 0, 2), 1], [addr('G', 0, 2), 1], [addr('I', 0, 2), 1],
         ]);
         const [newB, newG, oldB, oldR, oldG, oldI] = snap.map((m) => m[0]);
-        assertEqual('[walk] 移動後: 新しい位置(x=40,row0) B/Gplane', [newB, newG], [SHAPE[0], SHAPE[0]], results);
+        assertEqual(`[walk] 移動後: 新しい位置(x=${NEW_X},row0) B/Gplane`, [newB, newG], [SHAPE[0], SHAPE[0]], results);
         // 元の位置(byte2)は背景(バンド)だけに戻っていること(=背景が壊れていない)。
         // これがこのデモの主目的の検査。
         assertEqual('[walk] 【主目的】移動後: 元の位置(x=16,row0)は背景に復帰している(B/R/G/Iplane、背景が壊れていない検査)', [oldB, oldR, oldG, oldI], [0x00, 0xFF, 0x00, 0xFF], results);
       }
 
       // 3) SPACEキーで色を替える(白=色15→色3=青+赤)。Gプレーンだけ0x00になるはず。
+      // 読む位置は2)で確定した新しいx(=616,byte77)に合わせる。
       await sk(0x34, true); await sleep(350); await sk(0x34, false);
       await sleep(1500);
       {
         const [g, b] = (await readManyStable(page, [
-          [addr('G', 2, 5), 1], [addr('B', 2, 5), 1],
+          [addr('G', 2, NEW_BYTE), 1], [addr('B', 2, NEW_BYTE), 1],
         ])).map((m) => m[0]);
         assertEqual('[walk] SPACEで色替え: 新色(青+赤)ではGplaneが0x00になる(row2、変更前は0xFFだったはず)', [g], [0x00], results);
         assertEqual('[walk] SPACEで色替え: Bplaneはシルエットのまま(row2)', [b], [SHAPE[2]], results);
@@ -1187,7 +1213,7 @@ async function main() {
         ['地面タイル(レンガ)', magAssetSet.accent.rect, 16, 0, 16, 16],
         ['キャラDOWN[0](MAG由来)', magAssetSet.down[0].rect, 64, 64, 32, 32],
         ['キャラLEFT[0](MAG由来)', magAssetSet.leftFrames[0].rect, 160, 64, 32, 32],
-        ['キャラRIGHT[0](MAG由来、左向きの水平反転)', magAssetSet.rightFrames[0].rect, 256, 64, 32, 32],
+        ['キャラRIGHT[0](MAG由来、左向きの水平反転。期待値はcol7から独立に切り出し)', independentRightFrames[0].rect, 256, 64, 32, 32],
         ['キャラUP[0](MAG由来)', magAssetSet.up[0].rect, 352, 64, 32, 32],
       ];
       for (const [label, expectedRect, x, y, w, h] of checks) {
@@ -1219,11 +1245,19 @@ async function main() {
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const sk = (code, down) => page.evaluate((c, d) => window.p98probe.sendKey(c, d), code, down);
-      const tap = async (code) => { await sk(code, true); await sleep(350); await sk(code, false); await sleep(1200); };
+      // walk2.cは押しっぱなし移動(p98_key_down)になったため、「N回タップ→
+      // N歩」という制御はできない(何フレーム押していたかに移動量が依存し、
+      // 検証が時間依存になってしまう)。代わりに「壁に当たるまで押し続ける」
+      // ことで位置を確定させる。壁に当たった後は動かなくなるので、
+      // HOLD_MSを実際に必要な時間より十分長く取っても安全(壊れない)。
+      const HOLD_MS = 10000;
+      const holdToWall = async (code) => { await sk(code, true); await sleep(HOLD_MS); await sk(code, false); await sleep(1200); };
       const SC = { UP: 0x3A, RIGHT: 0x3C, DOWN: 0x3D, LEFT: 0x3B, ESC: 0x00 };
       const TILE = 16;
       const ACCENT_MOD = 5; // samples/walk2.c の ACCENT_MOD と一致させる
       const START_X = 16 * TILE, START_Y = 12 * TILE; // walk2.cの初期位置と一致
+      // samples/walk2.cのSCREEN_W/SCREEN_H/CHAR_W/CHAR_Hと同じ値(壁の位置)。
+      const RIGHT_WALL_X = 640 - 32, BOTTOM_WALL_Y = 400 - 32;
 
       // samples/walk2.c と同じ規則(tx+ty)%ACCENT_MOD===0でタイルを選び、
       // (x,y,w,h)(すべてTILE=16の倍数)ぶんの「背景だけ」の合成矩形を作る。
@@ -1258,6 +1292,17 @@ async function main() {
       function expectedComposite(x, y, frame) {
         return blendSprite(buildBackgroundRect(x, y, frame.rect.w, frame.rect.h), frame);
       }
+      // samples/walk2.cのcurrent_sprite(dir, (cx+cy)/STEP)と同じ規則で
+      // 期待コマを「位置」から決める(歩数カウンタは参照しない)。RIGHTの
+      // 期待フレームだけは、mag_convert.mjsの反転処理を経由しない
+      // independentRightFrames(原物col6/col7から直接切り出し)を使う。
+      function expectedFrame(dir, x, y) {
+        const idx = ((x + y) / TILE) % 2;
+        if (dir === 'UP')    return magAssetSet.up[idx];
+        if (dir === 'DOWN')  return magAssetSet.down[idx];
+        if (dir === 'LEFT')  return magAssetSet.leftFrames[idx];
+        return independentRightFrames[idx];
+      }
 
       await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/walk2.xdf`), PORT);
       const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('WALK2'));
@@ -1277,68 +1322,89 @@ async function main() {
       // 1) 起動直後: DOWN[0]が初期位置に、タイル背景の上に合成されて出ている。
       {
         const actual = await readVramRect(page, START_X, START_Y, 32, 32);
-        const expected = expectedComposite(START_X, START_Y, magAssetSet.down[0]);
+        const expected = expectedComposite(START_X, START_Y, expectedFrame('DOWN', START_X, START_Y));
         const ok = rectPlanesEqual(actual, expected);
         results.push({ label: '[walk2] 起動直後: キャラがDOWN[0]でタイル背景上の初期位置に出ている', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 起動直後の見た目`);
       }
 
-      // 2) RIGHTを2回押す: x=START_X+32(TILE2枚ぶん)、向き=RIGHT、
-      //    step=2 -> RIGHT[2]。1回目の位置(START_X+16)は通過するだけなので
-      //    最終的に地面タイルへ復元されているはず。
-      await tap(SC.RIGHT);
-      await tap(SC.RIGHT);
-      const afterRightX = START_X + 32;
+      // 2) RIGHTを右端まで押し続ける: cx=RIGHT_WALL_X(=608)で確定する
+      //    (256から16刻みで22回ちょうど届くため、壁に当たった位置が一意)。
+      await holdToWall(SC.RIGHT);
+      const afterRightX = RIGHT_WALL_X, afterRightY = START_Y;
       {
-        const actual = await readVramRect(page, afterRightX, START_Y, 32, 32);
-        const expected = expectedComposite(afterRightX, START_Y, magAssetSet.rightFrames[2]);
+        const actual = await readVramRect(page, afterRightX, afterRightY, 32, 32);
+        const expected = expectedComposite(afterRightX, afterRightY, expectedFrame('RIGHT', afterRightX, afterRightY));
         const ok = rectPlanesEqual(actual, expected);
-        results.push({ label: '[walk2] RIGHTを2回: 向きがRIGHTに変わりアニメがコマ2へ進む', ok, actual: ok ? '一致' : '不一致', expected: '一致(RIGHT[2])' });
+        results.push({ label: '[walk2] RIGHTを右端まで保持: 位置と向き(RIGHT)・アニメのコマが位置から決まる規則と一致', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] RIGHT移動+アニメ切替`);
       }
       {
         // 通過した1マス目(START_X+16, タイル境界)が地面タイルへ復元されている
         // ことを確認する(このデモの主目的: 差分復帰で背景が壊れていない)。
         const passedX = START_X + 16;
-        // 32x32のキャラ跡地は2x2枚のタイルにまたがる。左上16x16だけ確認する。
         const actual = await readVramRect(page, passedX, START_Y, 16, 16);
         const expected = buildBackgroundRect(passedX, START_Y, 16, 16);
         const ok = rectPlanesEqual(actual, expected);
-        results.push({ label: '【主目的】[walk2] 通過したマスの背景がタイル原本と完全一致(差分復帰が壊れていない)', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
-        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 通過後の背景復元`);
+        results.push({ label: '【主目的】[walk2] 通過したマスの背景がタイル原本と完全一致(差分復帰が壊れていない、RIGHT方向)', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 通過後の背景復元(RIGHT)`);
       }
 
-      // 3) DOWNを1回押す: 向き=DOWN、step=3 -> DOWN[3%2=1]。
-      await tap(SC.DOWN);
-      const afterDownY = START_Y + TILE;
+      // 3) DOWNを下端まで押し続ける: cyのみBOTTOM_WALL_Y(=368)へ変わる。
+      await holdToWall(SC.DOWN);
+      const afterDownX = afterRightX, afterDownY = BOTTOM_WALL_Y;
       {
-        const actual = await readVramRect(page, afterRightX, afterDownY, 32, 32);
-        const expected = expectedComposite(afterRightX, afterDownY, magAssetSet.down[1]);
+        const actual = await readVramRect(page, afterDownX, afterDownY, 32, 32);
+        const expected = expectedComposite(afterDownX, afterDownY, expectedFrame('DOWN', afterDownX, afterDownY));
         const ok = rectPlanesEqual(actual, expected);
-        results.push({ label: '[walk2] DOWNを1回: 向きがDOWNに変わりアニメがコマ1(DOWN[1])になる', ok, actual: ok ? '一致' : '不一致', expected: '一致(DOWN[1])' });
+        results.push({ label: '[walk2] DOWNを下端まで保持: 位置と向き(DOWN)・アニメのコマが位置から決まる規則と一致', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] DOWN移動+アニメ切替`);
       }
-
-      // 4) LEFTを1回押す: 向き=LEFT、step=4 -> LEFT[4%4=0]。
-      await tap(SC.LEFT);
-      const afterLeftX = afterRightX - TILE;
       {
-        const actual = await readVramRect(page, afterLeftX, afterDownY, 32, 32);
-        const expected = expectedComposite(afterLeftX, afterDownY, magAssetSet.leftFrames[0]);
+        const passedY = START_Y + TILE;
+        const actual = await readVramRect(page, afterDownX, passedY, 16, 16);
+        const expected = buildBackgroundRect(afterDownX, passedY, 16, 16);
         const ok = rectPlanesEqual(actual, expected);
-        results.push({ label: '[walk2] LEFTを1回: 向きがLEFTに変わる(LEFT[0])', ok, actual: ok ? '一致' : '不一致', expected: '一致(LEFT[0])' });
-        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] LEFT移動+向き切替`);
+        results.push({ label: '【主目的】[walk2] 通過したマスの背景がタイル原本と完全一致(差分復帰が壊れていない、DOWN方向)', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 通過後の背景復元(DOWN)`);
       }
 
-      // 5) UPを1回押す: 向き=UP、step=5 -> UP[5%2=1]。
-      await tap(SC.UP);
-      const afterUpY = afterDownY - TILE;
+      // 4) LEFTを左端まで押し続ける: cxのみ0へ変わる。
+      await holdToWall(SC.LEFT);
+      const afterLeftX = 0, afterLeftY = afterDownY;
       {
-        const actual = await readVramRect(page, afterLeftX, afterUpY, 32, 32);
-        const expected = expectedComposite(afterLeftX, afterUpY, magAssetSet.up[1]);
+        const actual = await readVramRect(page, afterLeftX, afterLeftY, 32, 32);
+        const expected = expectedComposite(afterLeftX, afterLeftY, expectedFrame('LEFT', afterLeftX, afterLeftY));
         const ok = rectPlanesEqual(actual, expected);
-        results.push({ label: '[walk2] UPを1回: 向きがUPに変わりアニメがコマ1(UP[1])になる', ok, actual: ok ? '一致' : '不一致', expected: '一致(UP[1])' });
+        results.push({ label: '[walk2] LEFTを左端まで保持: 位置と向き(LEFT)・アニメのコマが位置から決まる規則と一致', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] LEFT移動+向き切替`);
+      }
+      {
+        const passedX = afterDownX - TILE;
+        const actual = await readVramRect(page, passedX, afterDownY, 16, 16);
+        const expected = buildBackgroundRect(passedX, afterDownY, 16, 16);
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '【主目的】[walk2] 通過したマスの背景がタイル原本と完全一致(差分復帰が壊れていない、LEFT方向)', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 通過後の背景復元(LEFT)`);
+      }
+
+      // 5) UPを上端まで押し続ける: cyのみ0へ変わる。
+      await holdToWall(SC.UP);
+      const afterUpX = afterLeftX, afterUpY = 0;
+      {
+        const actual = await readVramRect(page, afterUpX, afterUpY, 32, 32);
+        const expected = expectedComposite(afterUpX, afterUpY, expectedFrame('UP', afterUpX, afterUpY));
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '[walk2] UPを上端まで保持: 位置と向き(UP)・アニメのコマが位置から決まる規則と一致', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
         console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] UP移動+アニメ切替`);
+      }
+      {
+        const passedY = afterLeftY - TILE;
+        const actual = await readVramRect(page, afterUpX, passedY, 16, 16);
+        const expected = buildBackgroundRect(afterUpX, passedY, 16, 16);
+        const ok = rectPlanesEqual(actual, expected);
+        results.push({ label: '【主目的】[walk2] 通過したマスの背景がタイル原本と完全一致(差分復帰が壊れていない、UP方向)', ok, actual: ok ? '一致' : '不一致', expected: '一致' });
+        console.log(`${ok ? 'OK  ' : 'FAIL'} [walk2] 通過後の背景復元(UP)`);
       }
 
       // 6) ESCで終了し、DOSへ戻ることを確認。

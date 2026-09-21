@@ -74,6 +74,7 @@ static void draw_background(void) {
 int main(void) {
     int cx = 16, cy = BAND_Y;
     int colorIdx = 0;
+    unsigned int frame = 0; /* 移動を4フレームに1回へ間引くためのカウンタ */
     int running = 1;
 
     p98_init();
@@ -81,14 +82,22 @@ int main(void) {
     while (running) {
         p98_wait_vsync();
         p98_poll();
+        frame++;
 
+        /* SPACEの色替えはp98_key_pressed(押した瞬間のみ)のままにする。
+         * p98_key_downにすると押しっぱなしで高速に色が変わり続けてしまう。 */
         if (p98_key_pressed(SC_SPACE)) {
             colorIdx = (colorIdx + 1) % 4;
         }
-        if (p98_key_pressed(SC_RIGHT) && cx + STEP <= SCREEN_W - CHAR_W) cx += STEP;
-        if (p98_key_pressed(SC_LEFT)  && cx - STEP >= 0)                cx -= STEP;
-        if (p98_key_pressed(SC_DOWN)  && cy + STEP <= SCREEN_H - CHAR_H) cy += STEP;
-        if (p98_key_pressed(SC_UP)    && cy - STEP >= 0)                 cy -= STEP;
+        /* 移動はp98_key_down(押している間ずっと真)にし、押しっぱなしで
+         * 歩き続けられるようにした。ただし毎VSYNCで16px動くと速すぎるため、
+         * 4フレームに1回だけ移動判定する。 */
+        if (frame % 4 == 0) {
+            if (p98_key_down(SC_RIGHT) && cx + STEP <= SCREEN_W - CHAR_W) cx += STEP;
+            if (p98_key_down(SC_LEFT)  && cx - STEP >= 0)                cx -= STEP;
+            if (p98_key_down(SC_DOWN)  && cy + STEP <= SCREEN_H - CHAR_H) cy += STEP;
+            if (p98_key_down(SC_UP)    && cy - STEP >= 0)                 cy -= STEP;
+        }
         if (p98_key_down(SC_ESC)) running = 0;
 
         draw_background();

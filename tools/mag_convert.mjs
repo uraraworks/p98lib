@@ -73,13 +73,31 @@ export async function buildAssetSetFromMag(magPath) {
   }
   const up = [charFrame(0), charFrame(1)];
   const down = [charFrame(2), charFrame(3)];
-  const leftFrames = [charFrame(4), charFrame(5), charFrame(6), charFrame(7)];
-  const rightFrames = leftFrames.map(({ rect, mask }) => {
+  // col4,col5が左向き2コマ(実測: col4==mirror(col7)、col5==mirror(col6)が
+  // バイト単位で完全一致。原物の並びは上×2/下×2/左×2/右×2で、右向きは
+  // 作者が最初から描いている。以前はcol4〜7を「左向き4コマ」と決め打ちして
+  // 反転で右向きを作っており、左右の並び順が食い違って歩行アニメに逆向きの
+  // コマが混ざる不具合になっていた)。
+  const leftFrames = [charFrame(4), charFrame(5)];
+  const rightSourceFrames = [charFrame(7), charFrame(6)]; // 反転結果と突き合わせる原物(col4↔col7, col5↔col6)
+  const rightFrames = leftFrames.map(({ rect, mask }, i) => {
     const mirroredRect = mirrorRectHorizontal(rect);
     const maskRect = { w: rect.w, h: rect.h, wBytes: rect.wBytes, planes: [mask] };
     const mirroredMaskRect = mirrorRectHorizontal(maskRect);
     const chk = verifyMirror(rect, mirroredRect);
     if (!chk.ok) throw new Error(`mirror検証に失敗: ${JSON.stringify(chk)}`);
+    // 「反転で作る」という近道が原物と食い違ったら止めるための機械検証:
+    // col4/col5の反転結果が、原物のcol7/col6とバイト単位で完全一致することを
+    // 実際に突き合わせる(思い込みで揃えず、素材の実測値で確認する)。
+    const against = rightSourceFrames[i].rect;
+    for (let p = 0; p < 4; p++) {
+      if (!mirroredRect.planes[p].equals(against.planes[p])) {
+        throw new Error(`col${i === 0 ? 4 : 5}の反転結果がcol${i === 0 ? 7 : 6}と不一致(plane=${p})`);
+      }
+    }
+    if (!mirroredMaskRect.planes[0].equals(rightSourceFrames[i].mask)) {
+      throw new Error(`col${i === 0 ? 4 : 5}の反転マスクがcol${i === 0 ? 7 : 6}のマスクと不一致`);
+    }
     return { rect: mirroredRect, mask: mirroredMaskRect.planes[0] };
   });
 
