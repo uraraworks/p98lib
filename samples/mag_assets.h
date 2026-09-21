@@ -1,5 +1,5 @@
 /* 自動生成: tools/mag_convert.mjs generate で作成。手編集しないこと。
- * 元データ: KYARA-03.MAG (ユーザー本人のオリジナル作品と確認済み。docs/assets.md参照)
+ * 元データ: KYARA-03.MAG (作者が1996〜97年に制作した画像から変換。docs/assets.md参照)
  * 生成内容: キャラ(CHAR_ROW段目)の歩行4方向アニメ + 地面タイル2種。
  */
 #include "p98.h"

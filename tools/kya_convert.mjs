@@ -2,8 +2,7 @@
 // KYA形式(PC-98、Quick C `_getimage`前段階のフルスクリーンダンプ)から
 // p98lib のスプライト/タイル形式(p98_sprite_t、docs/design.md参照)への変換ツール。
 //
-// 形式の根拠: `_local/README.md` の「KYA形式」節、および
-// `_local/legacy-a-games/C-GAMES/MAKEGRP.C`(ユーザー本人の著作物、参照可)の
+// 形式の根拠: 作者自身が1996年当時に書いたMAKEGRP.C(C-GAMES/MAKEGRP.C)の
 // gload()関数を実測して確認した:
 //   - 先頭48バイト = パレット16色×RGB各0〜15(RGBの順そのまま)
 //   - 48..49 = 1行のバイト数(80=640ドット、リトルエンディアン)
@@ -16,9 +15,8 @@
 //
 // 切り出し位置の根拠: 同じくMAKEGRP.C の setkyara()。
 //   - 32x32のキャラ: a*32, b*32 (a=0..7列, b=0..11段) → kyara[a+b*8]
-//     (8列=キャラ8体、12段=4方向×歩行3コマ、という並びだとMAKEGRP.Cのコメント
-//     および `_local/README.md` の記載から判断。全数を機械的に検証してはいない
-//     並び順の「意味」は未確認のまま明記する)
+//     (8列=キャラ8体、12段=4方向×歩行3コマ、という並びだとMAKEGRP.Cのコメントから
+//     判断。全数を機械的に検証してはおらず、並び順の「意味」は未確認のまま明記する)
 //   - 16x16の背景タイル: x=288+b*16, y=a*16 (a=0..15段, b=0..15列)
 //
 // マスク(透明色)の扱い: KYAはフルスクリーンのダンプで、アルファ/マスク情報を
@@ -294,7 +292,7 @@ export function stringifyAssets(assetSet, kyaPathForComment) {
   const { kya, up, down, leftFrames, rightFrames, ground, accent } = assetSet;
   const lines = [];
   lines.push('/* 自動生成: tools/kya_convert.mjs generate で作成。手編集しないこと。');
-  lines.push(` * 元データ: ${kyaPathForComment.replace(/^.*[\\/]/, '')} (ユーザー本人のオリジナル作品、C-GAMES/SAKA由来)`);
+  lines.push(` * 元データ: ${kyaPathForComment.replace(/^.*[\\/]/, '')} (作者が1996〜97年に制作した画像、C-GAMES/SAKA由来)`);
   lines.push(' * 生成内容: キャラ(CHAR_ROW段目)の歩行4方向アニメ + 地面タイル2種。');
   lines.push(' * 方向の並び([up*2,down*2,left*4])は目視確認、右向きはこのツールでの水平反転(docs/design.md参照)。');
   lines.push(' */');

@@ -1,6 +1,6 @@
 // MAG (MAKIchan MAKI02) 16色画像フォーマットのデコーダ。
 //
-// 出自: ユーザー本人の著作物 `WebPaint98/src/mag/mag.ts` の decodeMag() を
+// 出自: 作者の別プロジェクト `WebPaint98/src/mag/mag.ts` の decodeMag() を
 // 元にした移植(型注釈を外しただけの1:1ポート、ロジックは変更していない。
 // エンコード側(encodeMag)は今回のスコープ(既存MAGを読むだけ)では不要なため
 // 移植していない)。

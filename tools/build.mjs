@@ -56,8 +56,8 @@ function stageErrors(stage, errors) {
 /**
  * p98.c (ライブラリ本体、または libPath で差し替えた故障注入版)をオブジェクトへ、
  * src/p98_asm.asm を別途ELFオブジェクトへ変換し、ユーザーの.cをコンパイルする際に
- * その2つをextraLinkInputsとしてリンクする。p98libは huge model 固定
- * (ユーザー決定済み)。small で組もうとした場合は例外で止める。
+ * その2つをextraLinkInputsとしてリンクする。p98libは huge model 固定であり、
+ * small で組もうとした場合は例外で止める。
  *
  * @param {string} userSourcePath ユーザーの main() を含む .c ファイル
  * @param {{libPath?: string, model?: string}} [opts] libPath: 差し替えたいp98.c(故障注入版など)。省略時は src/p98.c

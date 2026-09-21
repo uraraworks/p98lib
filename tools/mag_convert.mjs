@@ -1,7 +1,7 @@
 // MAG形式(MAKI02) → p98スプライト形式への変換ツール。
 // tools/kya_convert.mjs と同じ形(buildAssetSet/stringifyAssets/generateAssets)に
-// 揃えてある。KYAはユーザー独自形式(作者向けに残す)だが、MAGは当時の標準
-// フォーマットなので、公開デモの素材はこちらを主役にする(コーディネーター指示)。
+// 揃えてある。KYAはp98lib独自形式(参考実装として残す)だが、MAGは当時の標準
+// フォーマットなので、公開デモの素材はこちらを主役にしている。
 //
 // mag.tsの取り込み方について(docs/design.md「MAG形式対応」節参照):
 // tools/mag_decode.mjs へ手作業でJS化した移植を置いた(TSのまま読む/
@@ -11,12 +11,11 @@ import { resolve } from 'node:path';
 import { decodeMag } from './mag_decode.mjs';
 import { computeMask, mirrorRectHorizontal, verifyMirror, emitCArray } from './kya_convert.mjs';
 
-// 2026-09後半、ORIGINAL/KYARA-03.MAG(ユーザー本人のオリジナル作品と確認済み、
-// 2026-09-21。docs/assets.md参照)へ切り替えた。MITEI2.KYAと同じ配置
-// (8列×12段のキャラ、x=288〜のタイル領域)だが、背景タイルの描き込みが
-// MITEI2系より多く、キャラの色数も多い(実測で確認、docs/design.md
-// 「MAG形式対応」節の追記参照)。CHAR_ROW/TILE_GROUND/TILE_ACCENTは
-// 決め打ちにせず、実際に変換・モザイク化して目視確認した上で選んだ。
+// 公開デモの素材はORIGINAL/KYARA-03.MAG(docs/assets.md参照)。
+// 8列×12段のキャラ、x=288〜のタイル領域という配置で、背景タイルの
+// 描き込みが多くキャラの色数も多い(docs/design.md「MAG形式対応」節参照)。
+// CHAR_ROW/TILE_GROUND/TILE_ACCENTは決め打ちにせず、実際に変換・
+// モザイク化して目視確認した上で選んだ。
 const CHAR_ROW = 0;
 const TILE_GROUND = { a: 0, b: 0 }; // 草(グリーン、スペックル)
 const TILE_ACCENT = { a: 0, b: 2 }; // レンガ(暗い赤、斜め模様)
@@ -99,7 +98,7 @@ export function stringifyMagAssets(assetSet, magPathForComment) {
   const { palette, up, down, leftFrames, rightFrames, ground, accent } = assetSet;
   const lines = [];
   lines.push('/* 自動生成: tools/mag_convert.mjs generate で作成。手編集しないこと。');
-  lines.push(` * 元データ: ${magPathForComment.replace(/^.*[\\/]/, '')} (ユーザー本人のオリジナル作品と確認済み。docs/assets.md参照)`);
+  lines.push(` * 元データ: ${magPathForComment.replace(/^.*[\\/]/, '')} (作者が1996〜97年に制作した画像から変換。docs/assets.md参照)`);
   lines.push(' * 生成内容: キャラ(CHAR_ROW段目)の歩行4方向アニメ + 地面タイル2種。');
   lines.push(' */');
   lines.push('#include "p98.h"');

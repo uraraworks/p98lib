@@ -220,26 +220,25 @@ async function withPage(browser, url, fn) {
   }
 }
 
-// 2026-09後半: デモ素材をORIGINAL/KYARA-03.MAGへ差し替えた(docs/assets.md参照。
-// ユーザー本人のオリジナル作品と確認済み。MITEI2.KYAと同じ配置だが、
-// 背景タイルの描き込みが多くキャラの色数も多い「色付き完全版」)。
+// 公開デモの素材はORIGINAL/KYARA-03.MAG(docs/assets.md参照。MITEI2.KYAと
+// 同じ配置だが、背景タイルの描き込みが多くキャラの色数も多い「色付き完全版」)。
 const MAG_PATH = resolve(REPO_ROOT, '../_local/legacy-a-games/ORIGINAL/KYARA-03.MAG');
 
 async function main() {
   const results = [];
   console.log('--- ビルド ---');
-  const magAssetSet = await buildAssetSetFromMag(MAG_PATH); // キャラ・タイルとも(2026-09後半、KYARA-03.MAG由来に統一)
+  const magAssetSet = await buildAssetSetFromMag(MAG_PATH); // キャラ・タイルともKYARA-03.MAG由来
 
-  // ---- KYA経由とMAG経由の突き合わせ(コーディネーター指示の「今回の肝」) ----
-  // 「MITEI2.KYAとMITEI2.MAGは同じ絵のはず」という前提で両方を変換し、
+  // ---- KYA経由とMAG経由の突き合わせ ----
+  // 「同じ名前のKYAとMAGは同じ絵のはず」という前提で両方を変換し、
   // バイト列(パレット・全画素のパレット番号)が一致するかを機械的に確認する。
   // 実測した結果、パレットは完全一致するが、画素の内容は一致しなかった
   // (詳細はdocs/design.md「MAG形式対応」節・docs/verify-log.md参照)。
   // 「一致しない場合はVRAMに出して実値で確かめる」を実行した結果:
-  //   - ユーザー本人の1996年当時のCローダー(_local/.../MAGL.C、コンパイル
-  //     済みのMAGL.EXE)を本物のFreeDOS(98)+WebNP2で実行し、MITEI2.MAGを
-  //     読み込ませてVRAMを直接ダンプしたところ、B/R/G/Iの4プレーンが
-  //     常に同一の値になる(=白黒2色しか使っていない)ことを確認した。
+  //   - 作者が1996年当時に書いたCローダー(コンパイル済みのMAGL.EXE)を
+  //     本物のFreeDOS(98)+WebNP2で実行し、MITEI2.MAGを読み込ませてVRAMを
+  //     直接ダンプしたところ、B/R/G/Iの4プレーンが常に同一の値になる
+  //     (=白黒2色しか使っていない)ことを確認した。
   //   - つまりtools/mag_decode.mjs(mag.tsの移植)のデコード結果は
   //     **実機相当のローダーと一致しており、デコーダのバグではない**。
   //     MITEI2.MAGというファイル自体が、MITEI2.KYAと違って白黒2色しか
@@ -248,8 +247,6 @@ async function main() {
   //     組み合わせだった(こちらもMAGL.EXE実行と目視で確認)。
   // この非対称な結果から、「同じ名前のKYA/MAGは常に同じ画素を持つ」という
   // 前提そのものが誤りだったと判断した(直すべきコードの問題ではない)。
-  // そのため、デモの素材は画素が実際に多色で使えるMITEI3.MAGを採用した
-  // (samples/mag_assets.h、上のmagAssetSet)。
   console.log('\n--- KYA経由とMAG経由の突き合わせ(MITEI2/MITEI3、実測結果をそのまま記録) ---');
   for (const [label, kyaName, magName] of [
     ['MITEI2', 'MITEI2.KYA', 'MITEI2.MAG'],

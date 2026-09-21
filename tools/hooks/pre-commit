@@ -1,0 +1,6 @@
+#!/bin/bash
+# pre-commit: コミット前に素材の混入検査を行う。
+# 有効化: git config core.hooksPath tools/hooks
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec node "$REPO_ROOT/tools/check_assets.mjs"

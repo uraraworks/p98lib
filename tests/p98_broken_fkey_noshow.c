@@ -52,7 +52,7 @@
  * INT 18h AH=04h(キーセンス、実測で確定。docs/design.md/verify-log.md参照):
  *  - AL=グループ番号(0-15)を渡すと、AHにそのグループの8スキャンコード分の
  *    押下状態がビットで返る。group=scancode>>3, bit=scancode&7, 1=押している
- *  - ユーザー(1996年当時の本人の著作物、SAKA.ASM/SHUTING.ASM)のソースに
+ *  - 作者が1996年当時に書いたSAKA.ASM/SHUTING.ASMのソースに
  *    実例があり、そこから読み取った規則をnp2kai上のsendKey注入で独立に
  *    実測して確認した(全数ではなく2キーぶんのサンプル実測。他はSAKA.ASM/
  *    SHUTING.ASMの実例と整合)
@@ -197,7 +197,7 @@ static void p98__int18_mode(unsigned char mode) {
 
 /* AHだけを立ててINT 18hを呼ぶ(引数無し版)。カーソル表示(AH=0x11)/
  * 非表示(AH=0x12)用(WebNP2-wiki Text-VRAM.md「カーソルを動かす・消す」参照、
- * ユーザー本人の著作物SHUTING.ASMの実例(AH=0x12でカーソルを消す)とも一致)。
+ * 作者が1996年に書いたSHUTING.ASMの実例(AH=0x12でカーソルを消す)とも一致)。
  * p98__int18_modeと同じ「引数はスタック相対」パターン。 */
 static void p98__int18_ah(unsigned char ah) {
     asm("mov ah, [bp+8]");
@@ -235,8 +235,8 @@ static void p98__dos_puts(const char *s) {
 }
 
 /* ファンクションキー行(画面24行目)の表示/非表示。実測で確認済み
- * (docs/design.md「ファンクションキー行を消す」節参照。ユーザー本人の
- * 著作物KEYSHOOT.C/SAKA.ASMの実例`ESC[>1h`/`ESC[>1l`と一致):
+ * (docs/design.md「ファンクションキー行を消す」節参照。作者が書いた
+ * KEYSHOOT.C/SAKA.ASMの実例`ESC[>1h`/`ESC[>1l`と一致):
  *   - `ESC[>1h`を送ると、24行目の文字コード面が空白に、属性面も
  *     ちょうど0xE1(表示・下線無し)に揃う。単に文字コード面を消すだけでは
  *     下線属性(0xE5)が残ってしまい、空白+下線が横一列に並んだ「白い帯」に
@@ -315,8 +315,8 @@ static unsigned char p98__key_pressed_snap[P98_KBD_GROUPS];/* cur & ~prev(この
 
 /* AH=04h キーセンス。AL=グループ番号(0-15)。戻り値(AH)の各ビットが
  * group*8+bit のスキャンコードの押下状態(1=押している)。実測で確認済み
- * (docs/verify-log.md参照。ユーザー本人の1996年のソース(SAKA.ASM/
- * SHUTING.ASM)の実例とも一致)。バッファは消費しない。 */
+ * (docs/verify-log.md参照。作者の1996年のソース(SAKA.ASM/SHUTING.ASM)の
+ * 実例とも一致)。バッファは消費しない。 */
 static unsigned char p98__kbd_sense(unsigned char group) {
     asm("mov al, [bp+8]");
     asm("mov ah, 0x04");

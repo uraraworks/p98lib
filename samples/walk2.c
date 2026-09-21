@@ -1,20 +1,13 @@
-/* p98lib デモ2: 実素材(ユーザー本人のオリジナル作品)を使った、
+/* p98lib デモ2: 実素材(作者が制作したオリジナル作品)を使った、
  * タイル背景+4方向歩行アニメのデモ。
  *
- * 【2026-09後半、素材をより良い原本(ORIGINAL/KYARA-03.MAG)へ差し替え】
- * 当初はC-GAMES/SAKA/MITEI2.KYA(キャラは多色だが背景タイルの描き込みが
- * 少ない)→ MITEI3.MAG(キャラは多色だがタイル領域はモノクロ、キャラも
- * SAKA/MITEI2.KYAとは別人)の順で試したが、`_local/legacy-a-games/
- * ORIGINAL/KYARA-03.MAG`(ユーザー本人のオリジナル作品と確認済み、
- * 2026-09-21。docs/assets.md参照)が、MITEI2.KYAと同じ配置でありながら
- * 背景タイルの描き込みが多く、キャラの色数も多い「色付き完全版」だと
- * 分かったため、こちらへ差し替えた。キャラ・タイルとも同じファイル
- * (KYARA-03.MAG)から切り出している(samples/mag_assets.h、
+ * 素材はORIGINAL/KYARA-03.MAG(docs/assets.md参照)から、キャラ・タイルとも
+ * 同じファイルを切り出している(samples/mag_assets.h、
  * tools/mag_convert.mjsで自動生成。手編集しないこと)。
  *
- * KYA(p98lib独自形式)はユーザー本人しか変換できないため、公開して他の人にも
+ * KYA(p98lib独自形式)は作者しか変換できないため、公開して他の人にも
  * 使ってもらう変換ツールとしてはMAG(当時の標準フォーマット)を主役にした。
- * KYA対応は作者向けとして tools/kya_convert.mjs に残してある
+ * KYA対応は参考実装として tools/kya_convert.mjs に残してある
  * (このデモでは使わない)。
  *
  *   - キャラ: 32x32、UP/DOWN 各2フレーム、LEFT 4フレーム、RIGHT はLEFTの

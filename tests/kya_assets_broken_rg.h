@@ -1,5 +1,5 @@
 /* 自動生成: tools/kya_convert.mjs generate で作成。手編集しないこと。
- * 元データ: MITEI2.KYA (ユーザー本人のオリジナル作品、C-GAMES/SAKA由来)
+ * 元データ: MITEI2.KYA (作者が1996〜97年に制作した画像、C-GAMES/SAKA由来)
  * 生成内容: キャラ(CHAR_ROW段目)の歩行4方向アニメ + 地面タイル2種。
  * 方向の並び([up*2,down*2,left*4])は目視確認、右向きはこのツールでの水平反転(docs/design.md参照)。
  */
