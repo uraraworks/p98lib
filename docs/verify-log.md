@@ -1411,7 +1411,7 @@ OK   [walk2] ESC終了後にVERを実行してプロンプトが返る
 
 公開準備一式(README/LICENSE/CONTRIBUTING/混入検査フックの
 追加、`docs/assets.md`の許可リスト化、`tools/verify.mjs`の素材無し環境
-対応)を含むコミット(264d1c3)は、`node tools/verify.mjs`を完走させられない
+対応)を含むコミット(264d1c3・e535c1f)は、`node tools/verify.mjs`を完走させられない
 まま行っていたが、2026-09-21に改めて`node tools/verify.mjs` を完走させた。
 
 ```
