@@ -1,14 +1,5 @@
 # p98lib
 
-> **[公開前に必ず確認] 検証未実行の変更が含まれています。**
-> 公開準備(README/LICENSE/CONTRIBUTING/混入検査フックの追加、`docs/assets.md`の
-> 許可リスト化、`tools/verify.mjs`の素材無し環境対応)のコミットは、
-> `node tools/verify.mjs` を完走させられないまま行いました(実行環境側の
-> puppeteer/Chromeが不安定で、2回試して2回とも別の箇所でタイムアウトした
-> ため。詳細は `docs/verify-log.md` 末尾を参照)。**push・公開の前に、
-> 安定した環境で `node tools/verify.mjs` を実行し、163項目が通ることを
-> 確認してください。** このメモは検証が通ったことを確認したら削除してよい。
-
 A minimal C graphics/input library for PC-98 (386+) games, built and verified on WebNP2(NP2kai).
 
 PC-98(386以上)向けの、C言語で書くゲームのための最小グラフィックライブラリです。
