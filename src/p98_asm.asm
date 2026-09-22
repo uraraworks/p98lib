@@ -111,3 +111,54 @@ _p98__egc_row:
 ; far pointerとして渡す経路はこのライブラリから無くなっている。
 ;
 ; 経緯の詳細はdocs/design.md・docs/verify-log.md参照。
+
+; p98__pokew4(off, wB, wR, wG, wI) : void
+;   4プレーンぶんを1ワードずつ(=1プレーンあたり2バイト)まとめて書く。
+;   src/p98.c の p98__vram_upload_pixels / p98__vram_store_inverted_mask が、
+;   従来の「プレーンごと・1バイトごとにp98__pokeb()をfar call」する経路
+;   (アップロード1回=32x32マスク付きで実測9.56ms、tools/probe_vram_upload_bench.c)
+;   を置き換えるために追加した。1呼び出しでfar call 1回・4プレーン×2バイト
+;   書けるため、呼び出し回数はバイト数×4プレーンからワード数まで1/8になる
+;   (2026-09、docs/design.md参照)。
+;
+;   4プレーンのセグメント値はここに即値として持つ(Cのポインタは一切渡さない
+;   方針を崩さないため。p98__copy_far_to_vram撤去の経緯はファイル冒頭コメント・
+;   docs/design.md「配置依存の不具合」節参照)。**この4値は src/p98.c の
+;   P98_SEG_PLANE_B/R/G/I と同じでなければならない。ずれた場合は
+;   tests/probe_vram_upload_bytes.c(VRAM置き場のバイト列が元のp98_sprite_tと
+;   一致することを見る一次検査)がFAILで検出する。**
+;     B(青)=0xA800, R(赤)=0xB000, G(緑)=0xB800, I(輝度)=0xE000
+;   B/R/Gは0x800刻みだがIだけ離れている(隣接しない)ため、計算せず4つとも
+;   即値で書く。
+;
+;   引数は他のプリミティブと同じ4バイトスロット([bp+8]=off, [bp+12]=wB,
+;   [bp+16]=wR, [bp+20]=wG, [bp+24]=wI)。off は4プレーン共通(各プレーンの
+;   セグメントが違うだけで同じオフセット)。
+    global _p98__pokew4
+_p98__pokew4:
+    push    ebp
+    movzx   ebp, sp
+    mov     bx, [bp+8]      ; off(4プレーン共通)
+
+    mov     ax, 0xA800      ; P98_SEG_PLANE_B と同じ値であること(src/p98.c参照)
+    mov     es, ax
+    mov     ax, [bp+12]     ; wB
+    mov     [es:bx], ax
+
+    mov     ax, 0xB000      ; P98_SEG_PLANE_R と同じ値であること(src/p98.c参照)
+    mov     es, ax
+    mov     ax, [bp+16]     ; wR
+    mov     [es:bx], ax
+
+    mov     ax, 0xB800      ; P98_SEG_PLANE_G と同じ値であること(src/p98.c参照)
+    mov     es, ax
+    mov     ax, [bp+20]     ; wG
+    mov     [es:bx], ax
+
+    mov     ax, 0xE000      ; P98_SEG_PLANE_I と同じ値であること(src/p98.c参照)
+    mov     es, ax
+    mov     ax, [bp+24]     ; wI
+    mov     [es:bx], ax
+
+    o32 leave
+    retf

@@ -24,9 +24,15 @@
  *   - タイル2種(16x16・全ドット不透明)は起動時に p98_vram_upload() で
  *     置き場へ常駐させ、以後は p98_draw_sprite_vram() で敷く。
  *   - キャラ(32x32・マスクあり、絵128B+反転マスク128B=256B)は置き場
- *     768B/プレーンに8コマ全部は収まらないため、スロットを1つだけ確保し、
- *     直前に置いたコマと違うときだけ p98_vram_reupload() で置き直す
- *     (draw_character()参照)。描画は p98_draw_sprite_vram_diff()。
+ *     768B/プレーンに8コマ全部(2048B)は収まらないため、常駐は「いま向いて
+ *     いる方向の2コマ」だけに絞った(タイル2種64B+キャラ2コマ520B=584B
+ *     <768Bで収まる。2026-09、アップロード自体が重い(実測9.56ms/回、
+ *     tests/probe_vram_upload_bench.c)ことが分かったため、コマ送り自体では
+ *     置き直しが起きないようスロットを2つ(現在の向きの2フレーム)に
+ *     増やした)。スロット2つを直前に置いた向き(loadedDir)と比べ、
+ *     向きが変わったときだけ両方を p98_vram_reupload() で置き直す
+ *     (draw_character()参照)。同じ向きのままコマ送りするだけなら
+ *     アップロードは一切発生しない。描画は p98_draw_sprite_vram_diff()。
  *   - p98_vram_upload()が失敗した場合(想定外の容量不足等)は、デモが
  *     黙って壊れないよう、その系統(タイル/キャラそれぞれ独立に)だけ
  *     従来のCPU経路(p98_draw_sprite()/p98_draw_sprite_diff())へ
@@ -98,29 +104,40 @@ static const p98_sprite_t *current_sprite(dir_t dir, int step) {
     return MAG_WALK_RIGHT[step % 2];
 }
 
-/* キャラを(x,y)へ描く。*charVramOkが真の間は、置き場のスロット1つ
- * (*vs)をコマ替えのたびに使い回す: 直前に置いたコマ(*loaded)と今回の
- * sprが違うときだけアップロードし直す(同じコマが続く間は何もしない)。
- * 初回(*loaded==0)はp98_vram_upload()、2回目以降はp98_vram_reupload()を
- * 使う(w/h/opaqueが同じであることが前提。歩行アニメの8コマは全て
- * 32x32・マスクありで揃っているため一致するはずだが、万一
- * 一致せず失敗した場合も*charVramOkを落として以後はCPU経路へ
+/* キャラを(x,y)へ描く。*charVramOkが真の間は、置き場のスロット2つ
+ * (vs[0]/vs[1]=現在の向きの2フレームぶん)をコマ替えのたびに使い回す:
+ * 直前にスロットへ置いた向き(*loadedDir、未アップロードなら-1)と今回の
+ * dirが違うときだけ、2フレームぶんまとめてアップロードし直す
+ * (同じ向きのままコマ送り(frameIdx=0/1切り替え)するだけならアップロード
+ * は一切発生しない。これがwalk2側の狙い: アップロード1回が重い
+ * (実測、tests/probe_vram_upload_bench.c)ため、頻度の高い「コマ送り」では
+ * 起こさず、頻度の低い「向き変更」でだけ起こす)。
+ * 初回(*slotsAllocated==0)はp98_vram_upload()、2回目以降(向き変更時)は
+ * p98_vram_reupload()を使う(w/h/opaqueが同じであることが前提。歩行
+ * アニメの8コマは全て32x32・マスクありで揃っているため一致するはずだが、
+ * 万一一致せず失敗した場合も*charVramOkを落として以後はCPU経路へ
  * フォールバックするので、デモが止まったり結果がおかしくなったりはしない)。 */
-static void draw_character(const p98_sprite_t *spr, int x, int y,
-                            int *charVramOk, p98_vram_sprite_t *vs, const p98_sprite_t **loaded) {
-    if (*charVramOk && *loaded != spr) {
-        int rc = (*loaded == 0) ? p98_vram_upload(spr, vs) : p98_vram_reupload(vs, spr);
-        if (rc == 0) {
-            *loaded = spr;
+static void draw_character(dir_t dir, int frameIdx, int x, int y,
+                            int *charVramOk, int *slotsAllocated, p98_vram_sprite_t vs[2], int *loadedDir) {
+    if (*charVramOk && *loadedDir != (int)dir) {
+        int f, ok = 1;
+        for (f = 0; f < 2; f++) {
+            const p98_sprite_t *spr = current_sprite(dir, f);
+            int rc = (*slotsAllocated) ? p98_vram_reupload(&vs[f], spr) : p98_vram_upload(spr, &vs[f]);
+            if (rc != 0) { ok = 0; break; }
+        }
+        if (ok) {
+            *slotsAllocated = 1;
+            *loadedDir = (int)dir;
         } else {
             *charVramOk = 0; /* 以後は今回もこの先もCPU経路へフォールバック */
         }
     }
 
     if (*charVramOk) {
-        p98_draw_sprite_vram_diff(vs, x, y);
+        p98_draw_sprite_vram_diff(&vs[frameIdx], x, y);
     } else {
-        p98_draw_sprite_diff(spr, x, y);
+        p98_draw_sprite_diff(current_sprite(dir, frameIdx), x, y);
     }
 }
 
@@ -130,10 +147,11 @@ int main(void) {
     unsigned int frame = 0; /* 移動を4フレームに1回へ間引くためのカウンタ */
     int running = 1;
 
-    p98_vram_sprite_t vsTileGround, vsTileAccent, vsChar;
+    p98_vram_sprite_t vsTileGround, vsTileAccent, vsChar[2];
     int tilesVram;
     int charVramOk = 1; /* 初回のdraw_character()呼び出しでp98_vram_upload()を試す */
-    const p98_sprite_t *charLoaded = 0; /* 現在vsCharに載っているコマ(未アップロードならNULL) */
+    int charSlotsAllocated = 0; /* vsChar[0]/[1]がまだ一度もアップロードされていない */
+    int charLoadedDir = -1; /* 現在vsChar[0]/[1]に載っている向き(未アップロードなら-1。dir_tは0始まりなので0と区別するため) */
 
     p98_init_bgpage();
     apply_palette();
@@ -158,7 +176,7 @@ int main(void) {
      * 押していたかに依存してしまい、tools/verify.mjsでの検証が時間依存に
      * なって予測できなくなる。位置(cx+cy)は移動量から一意に決まるので、
      * それをそのままコマ番号の元にする。 */
-    draw_character(current_sprite(dir, (cx + cy) / STEP), cx, cy, &charVramOk, &vsChar, &charLoaded);
+    draw_character(dir, ((cx + cy) / STEP) % 2, cx, cy, &charVramOk, &charSlotsAllocated, vsChar, &charLoadedDir);
 
     while (running) {
         p98_wait_vsync();
@@ -183,7 +201,7 @@ int main(void) {
             continue; /* 移動が無ければ再描画しない(前回のまま) */
         }
 
-        draw_character(current_sprite(dir, (cx + cy) / STEP), cx, cy, &charVramOk, &vsChar, &charLoaded);
+        draw_character(dir, ((cx + cy) / STEP) % 2, cx, cy, &charVramOk, &charSlotsAllocated, vsChar, &charLoadedDir);
     }
 
     p98_quit();

@@ -103,6 +103,21 @@ extern void p98__blend_bits(unsigned seg, unsigned off, unsigned char bits, unsi
  * して渡す経路は本ライブラリから無くなっている。 */
 extern void p98__egc_row(unsigned seg, unsigned srcOff, unsigned dstOff, unsigned wordCount);
 
+/* 4プレーンぶんを1ワードずつ(=1プレーンあたり2バイト)まとめて書く。実装は
+ * src/p98_asm.asm。p98_vram_upload()/p98_vram_reupload()のアップロード自体が
+ * 「プレーンごと・1バイトごとにp98__pokeb()をfar call」していて遅い
+ * (32x32マスク付きで実測9.56ms、tests/probe_vram_upload_bench.c)ことへの
+ * 対策として2026-09に追加した。far callの回数を「バイト数×4プレーン」から
+ * 「ワード数」まで1/8に減らす。
+ *
+ * 4プレーンのセグメント値はasm側に即値で持たせてある(Cのポインタを
+ * asmへ渡さない方針=p98__copy_far_to_vram撤去の理由を崩さないため。上記
+ * p98__egc_rowコメント・docs/design.md参照)。**asm側の即値(0xA800/0xB000/
+ * 0xB800/0xE000)は、下のP98_SEG_PLANE_B/R/G/Iの定義と同じ値であること。
+ * ずれるとVRAMへ違うプレーンの内容が書かれて壊れる(この一次検査は
+ * tests/probe_vram_upload_bytes.cが捕まえる)。** */
+extern void p98__pokew4(unsigned off, unsigned wB, unsigned wR, unsigned wG, unsigned wI);
+
 /* in port (1バイト、ゼロ拡張して返す) */
 static unsigned char p98__inb(unsigned port) {
     asm("mov dx, [bp+8]");
@@ -995,60 +1010,93 @@ int p98_vram_free_bytes(void) {
  * なっている。walk2はコマが変わるたびにp98_vram_reupload()で置き直す
  * ため、そのコストをtests/probe_vram_upload_bench.c/docs/verify-log.mdで
  * 実測してある。 */
-static void p98__vram_upload_pixels(unsigned pixOff, const p98_sprite_t *spr, int pixBytes, unsigned char opaque) {
-    int p, i;
+/* 2026-09後半、4プレーンぶんを1バイトずつp98__pokeb()でfar callしていた
+ * (呼び出し回数=バイト数×4プレーン)のを、p98__pokew4()で「4プレーン×
+ * 1ワード(2バイト)」を1回のfar callへまとめる形に変えた(実測9.56ms→
+ * 詳細はdocs/design.md/docs/verify-log.md参照)。Cのポインタをasmへ渡す
+ * 経路は復活させておらず、4プレーンぶんの2バイトはCでunsignedへ組み立てて
+ * から渡す(p98__pokew4の引数はコンパイル時定数のセグメントと計算済み
+ * オフセット・値のみで、ポインタは含まない)。
+ *
+ * spr->w は16の倍数固定(p98_vram_upload()の入口チェック)なので、
+ * rowBytes=words*2は常に偶数、pixBytes(=rowBytes*h)も常に偶数になり、
+ * 実際には奇数バイトの余りは発生しない。ただし将来の変更で崩れても
+ * 静かに1バイト読み落とさないよう、念のため奇数側のフォールバック
+ * (p98__pokebで1バイトずつ)を残してある。 */
+static void p98__vram_write_pixel_words(unsigned dstOff, const p98_sprite_t *spr, int pixBytes, unsigned char opaque) {
+    const unsigned char *pB = spr->planes[0];
+    const unsigned char *pR = spr->planes[1];
+    const unsigned char *pG = spr->planes[2];
+    const unsigned char *pI = spr->planes[3];
+    const unsigned char *mask = spr->mask;
+    int wordCount = pixBytes >> 1;
+    int i;
 
-    for (p = 0; p < 4; p++) {
-        const unsigned char *plane = spr->planes[p];
-        const unsigned char *mask = spr->mask;
-        unsigned dstOff = (unsigned)(P98_VRAM_STORE_OFF + pixOff);
-        unsigned seg = p98__plane_seg[p];
-
-        if (opaque) {
-            p98__outb(P98_PORT_DRAW_PAGE, 0);
-            for (i = 0; i < pixBytes; i++) {
-                p98__pokeb(seg, (unsigned)(dstOff + i), plane[i]);
-            }
-            p98__outb(P98_PORT_DRAW_PAGE, 1);
-            for (i = 0; i < pixBytes; i++) {
-                p98__pokeb(seg, (unsigned)(dstOff + i), plane[i]);
-            }
-            continue;
-        }
-
-        p98__outb(P98_PORT_DRAW_PAGE, 0);
-        for (i = 0; i < pixBytes; i++) {
-            p98__pokeb(seg, (unsigned)(dstOff + i), (unsigned char)(plane[i] & mask[i]));
-        }
-        p98__outb(P98_PORT_DRAW_PAGE, 1);
-        for (i = 0; i < pixBytes; i++) {
-            p98__pokeb(seg, (unsigned)(dstOff + i), (unsigned char)(plane[i] & mask[i]));
-        }
+    for (i = 0; i < wordCount; i++) {
+        int b0 = i * 2, b1 = b0 + 1;
+        unsigned char m0 = opaque ? 0xFF : mask[b0];
+        unsigned char m1 = opaque ? 0xFF : mask[b1];
+        unsigned wB = (unsigned)(unsigned char)(pB[b0] & m0) | ((unsigned)(unsigned char)(pB[b1] & m1) << 8);
+        unsigned wR = (unsigned)(unsigned char)(pR[b0] & m0) | ((unsigned)(unsigned char)(pR[b1] & m1) << 8);
+        unsigned wG = (unsigned)(unsigned char)(pG[b0] & m0) | ((unsigned)(unsigned char)(pG[b1] & m1) << 8);
+        unsigned wI = (unsigned)(unsigned char)(pI[b0] & m0) | ((unsigned)(unsigned char)(pI[b1] & m1) << 8);
+        p98__pokew4((unsigned)(dstOff + (unsigned)(i * 2)), wB, wR, wG, wI);
     }
+    if (pixBytes & 1) {
+        int b = wordCount * 2;
+        unsigned char m = opaque ? 0xFF : mask[b];
+        unsigned off = (unsigned)(dstOff + (unsigned)b);
+        p98__pokeb(p98__plane_seg[0], off, (unsigned char)(pB[b] & m));
+        p98__pokeb(p98__plane_seg[1], off, (unsigned char)(pR[b] & m));
+        p98__pokeb(p98__plane_seg[2], off, (unsigned char)(pG[b] & m));
+        p98__pokeb(p98__plane_seg[3], off, (unsigned char)(pI[b] & m));
+    }
+}
+
+static void p98__vram_upload_pixels(unsigned pixOff, const p98_sprite_t *spr, int pixBytes, unsigned char opaque) {
+    unsigned dstOff = (unsigned)(P98_VRAM_STORE_OFF + pixOff);
+
+    p98__outb(P98_PORT_DRAW_PAGE, 0);
+    p98__vram_write_pixel_words(dstOff, spr, pixBytes, opaque);
+    p98__outb(P98_PORT_DRAW_PAGE, 1);
+    p98__vram_write_pixel_words(dstOff, spr, pixBytes, opaque);
 }
 
 /* 反転マスク(~spr->mask)を4プレーン(同一内容)へ、ページ0・ページ1の
  * 両方へ書く。p98_draw_sprite_vram()のパス1(ope=AND)がこの反転マスクで
  * 「これから描くドットぶんだけ背景を0にする」ために使う。
  *
- * p98__vram_upload_pixels()の非opaque経路と同じ理由(2026-09実測)で、
- * 静的な作業用バッファ+copy_far_to_vram()ではなくp98__pokeb()で直接
- * 書く(p98__vram_mask_bufという静的バッファは廃止した)。 */
+ * p98__vram_write_pixel_words()と同じ理由でp98__pokew4()にまとめている
+ * (4プレーンとも同じ値になるため、4引数すべてに同じワードを渡す)。 */
+static void p98__vram_write_mask_words(unsigned dstOff, const unsigned char *mask, int pixBytes) {
+    int wordCount = pixBytes >> 1;
+    int i;
+
+    for (i = 0; i < wordCount; i++) {
+        int b0 = i * 2, b1 = b0 + 1;
+        unsigned char v0 = (unsigned char)~mask[b0];
+        unsigned char v1 = (unsigned char)~mask[b1];
+        unsigned w = (unsigned)v0 | ((unsigned)v1 << 8);
+        p98__pokew4((unsigned)(dstOff + (unsigned)(i * 2)), w, w, w, w);
+    }
+    if (pixBytes & 1) {
+        int b = wordCount * 2;
+        unsigned char v = (unsigned char)~mask[b];
+        unsigned off = (unsigned)(dstOff + (unsigned)b);
+        p98__pokeb(p98__plane_seg[0], off, v);
+        p98__pokeb(p98__plane_seg[1], off, v);
+        p98__pokeb(p98__plane_seg[2], off, v);
+        p98__pokeb(p98__plane_seg[3], off, v);
+    }
+}
+
 static void p98__vram_store_inverted_mask(unsigned maskOff, const unsigned char *mask, int pixBytes) {
-    int p, i;
     unsigned dstOff = (unsigned)(P98_VRAM_STORE_OFF + maskOff);
 
-    for (p = 0; p < 4; p++) {
-        unsigned seg = p98__plane_seg[p];
-        p98__outb(P98_PORT_DRAW_PAGE, 0);
-        for (i = 0; i < pixBytes; i++) {
-            p98__pokeb(seg, (unsigned)(dstOff + i), (unsigned char)~mask[i]);
-        }
-        p98__outb(P98_PORT_DRAW_PAGE, 1);
-        for (i = 0; i < pixBytes; i++) {
-            p98__pokeb(seg, (unsigned)(dstOff + i), (unsigned char)~mask[i]);
-        }
-    }
+    p98__outb(P98_PORT_DRAW_PAGE, 0);
+    p98__vram_write_mask_words(dstOff, mask, pixBytes);
+    p98__outb(P98_PORT_DRAW_PAGE, 1);
+    p98__vram_write_mask_words(dstOff, mask, pixBytes);
 }
 
 /* sprのmaskがpixBytesぶん全バイト0xFF(=全ドット不透明)かどうか。 */
