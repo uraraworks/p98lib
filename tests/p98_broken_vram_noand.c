@@ -103,10 +103,17 @@ extern void p98__outb(unsigned port, unsigned char val);
  * 追加した(p98__outbと同じ「別ファイルのNASM→ELFオブジェクト」経路)。 */
 extern void p98__blend_bits(unsigned seg, unsigned off, unsigned char bits, unsigned char mask);
 
-/* EGCによる本来のスプライト転送(p98_draw_sprite_vram, src/p98.c)用の2つ。
- * 実装は src/p98_asm.asm。p98__blend_bitsと同じ「別ファイルのNASM」経路。 */
+/* EGCによる本来のスプライト転送(p98_draw_sprite_vram, src/p98.c)用。
+ * 実装は src/p98_asm.asm。p98__blend_bitsと同じ「別ファイルのNASM」経路。
+ *
+ * p98__copy_far_to_vram()(Cのポインタをfar pointer化してVRAMへrep movsbする
+ * プリミティブ)は2026-09に撤去した: 大きい静的配列のアドレスをfar pointer
+ * へ変換する処理が、ライブラリ内の無関係な静的データの増減で配置が変わると
+ * 壊れる(無関係なメモリを読む)ことが分かったため(docs/design.md「配置
+ * 依存の不具合」節参照)。VRAMアップロードは全経路をp98__pokeb()による
+ * 1バイトずつの直接書き込みへ寄せてあり、Cのポインタをasm側へfar pointerと
+ * して渡す経路は本ライブラリから無くなっている。 */
 extern void p98__egc_row(unsigned seg, unsigned srcOff, unsigned dstOff, unsigned wordCount);
-extern void p98__copy_far_to_vram(unsigned seg, unsigned dstOff, const unsigned char *src, unsigned byteCount);
 
 /* in port (1バイト、ゼロ拡張して返す) */
 static unsigned char p98__inb(unsigned port) {
@@ -928,15 +935,6 @@ void p98_draw_sprite_diff(const p98_sprite_t *spr, int x, int y) {
  * 戻すことだけできる(design方針。ヘッダのコメント参照)。 */
 static unsigned p98__vram_used = 0;
 
-/* 反転マスク(~spr->mask)を組み立ててからVRAMへ転送するための作業領域。
- * P98_VRAM_STORE_SIZEバイトあれば1スプライトぶんの最大サイズを常に
- * 賄える(置き場自体がその大きさしかないため)。 */
-static unsigned char p98__vram_mask_buf[P98_VRAM_STORE_SIZE];
-
-/* 透明ドットがある場合に「絵 & マスク」を組み立ててからVRAMへ転送する
- * ための作業領域(下のp98__vram_upload_pixels()参照)。 */
-static unsigned char p98__vram_pix_buf[P98_VRAM_STORE_SIZE];
-
 /* 現在CPUから見えている描画ページを返す(flipモードはp98__draw_page、
  * bgpageモードはp98__draw_targetに応じてscreen/bgのどちらか)。
  * p98_vram_upload()がページ0・1の両方へ書いた後、元のページへ確実に
@@ -970,27 +968,6 @@ int p98_vram_free_bytes(void) {
     return (int)(P98_VRAM_STORE_SIZE - p98__vram_used);
 }
 
-/* src[0..3](4プレーンぶんのfarポインタ、同じ内容でもよい)をstoreOffへ、
- * ページ0・ページ1の両方へ書き込む(p98_draw_sprite_vram()がどちらの
- * 描画ページへ描いてもEGCの転送元が揃うようにするため)。呼び出し前に
- * p98__egc_disable()済み(普通のCPU書き込みであるため)であること。 */
-/* 1プレーンぶんだけをstoreOffへ、ページ0・ページ1の両方へ書き込む。
- * 呼び出し前にp98__egc_disable()済みであること(p98__vram_store_planes()と同じ)。 */
-static void p98__vram_store_plane(unsigned storeOff, int p, const unsigned char *src, int bytes) {
-    unsigned dstOff = (unsigned)(P98_VRAM_STORE_OFF + storeOff);
-    p98__outb(P98_PORT_DRAW_PAGE, 0);
-    p98__copy_far_to_vram(p98__plane_seg[p], dstOff, src, (unsigned)bytes);
-    p98__outb(P98_PORT_DRAW_PAGE, 1);
-    p98__copy_far_to_vram(p98__plane_seg[p], dstOff, src, (unsigned)bytes);
-}
-
-static void p98__vram_store_planes(unsigned storeOff, const unsigned char *src[4], int bytes) {
-    int p;
-    for (p = 0; p < 4; p++) {
-        p98__vram_store_plane(storeOff, p, src[p], bytes);
-    }
-}
-
 /* 絵(4プレーン)をVRAMへ書き込む。opaque(全ドット不透明)ならプレーンの
  * 内容をそのまま書けばよいが、透明ドットがある場合は
  * planes[p][i] & mask[i] にしてから書く。
@@ -1001,27 +978,88 @@ static void p98__vram_store_planes(unsigned storeOff, const unsigned char *src[4
  * (p98__blend_bits)はマスクでビット単位に選択するのでこの前提を必要と
  * しないが、素材によっては透明部分に0以外のビットが残っていることが
  * あり、その場合そのままVRAMへ書くとパス2のORで背景に絵のゴミが乗って
- * しまい、CPU経路と結果がずれる。プレーンごとに絵の内容が違うため、
- * 1プレーンずつ作業用バッファへANDしてから書く。 */
+ * しまい、CPU経路と結果がずれる。
+ *
+ * 2026-09の実測(tests/probe_vram_upload_bytes.c参照): 以前はここで
+ * 「plane[i]&mask[i](opaqueならplane[i]そのまま)をメインメモリの静的な
+ * 作業用バッファへ組み立てるか、あるいはspr->planes[p]のアドレスを
+ * そのまま、huge modelのfar pointerに変換してまとめてcopy_far_to_vram()へ
+ * 渡す」実装だったが、この「大きい静的配列のアドレスをfar pointerへ
+ * 変換する」処理が、ライブラリ内の無関係な静的データの増減で配置が
+ * 変わると壊れることが分かった(作業用バッファを読み出せば中身は正しい
+ * =AND計算自体は正しいのに、そのアドレスをfar pointer化して
+ * copy_far_to_vram()へ渡すとDOSの環境ブロック相当の無関係なメモリを
+ * 読んでしまう)。walk2(samples/walk2.c)の見た目が無関係な変更で
+ * 変わったのはこれが原因だった(非opaque経路で先に発見したが、opaque
+ * 経路も同じp98__copy_far_to_vram()を使っていた以上、同じ地雷を抱えて
+ * いた。たまたまその時点の配置では症状が出ていなかっただけ)。
+ *
+ * 対策として、作業用バッファは持たず、opaque/非opaqueとも
+ * plane[i](&mask[i])を1バイトずつp98__pokeb()で直接VRAMへ書く。
+ * p98__pokeb()はコンパイル時定数のセグメント(p98__plane_seg[p])と
+ * 計算済みオフセットだけを使い、「大きい静的配列のアドレスをfar pointerに
+ * 変換する」という壊れていた操作を経由しない(このファイルの他のVRAM
+ * 書き込み(p98__blend_bits等)で既に使われている、実績のある経路と同じ)。
+ * これにより p98__copy_far_to_vram() は呼び出し元が無くなり、撤去した
+ * (src/p98_asm.asmから_p98__copy_far_to_vramも削除済み)。
+ *
+ * この書き方は元のrep movsb(まとめて転送)よりアップロード自体は遅く
+ * なっている。walk2はコマが変わるたびにp98_vram_reupload()で置き直す
+ * ため、そのコストをtests/probe_vram_upload_bench.c/docs/verify-log.mdで
+ * 実測してある。 */
 static void p98__vram_upload_pixels(unsigned pixOff, const p98_sprite_t *spr, int pixBytes, unsigned char opaque) {
     int p, i;
-    const unsigned char *pixSrc[4];
-
-    if (opaque) {
-        pixSrc[0] = spr->planes[0];
-        pixSrc[1] = spr->planes[1];
-        pixSrc[2] = spr->planes[2];
-        pixSrc[3] = spr->planes[3];
-        p98__vram_store_planes(pixOff, pixSrc, pixBytes);
-        return;
-    }
 
     for (p = 0; p < 4; p++) {
         const unsigned char *plane = spr->planes[p];
-        for (i = 0; i < pixBytes; i++) {
-            p98__vram_pix_buf[i] = (unsigned char)(plane[i] & spr->mask[i]);
+        const unsigned char *mask = spr->mask;
+        unsigned dstOff = (unsigned)(P98_VRAM_STORE_OFF + pixOff);
+        unsigned seg = p98__plane_seg[p];
+
+        if (opaque) {
+            p98__outb(P98_PORT_DRAW_PAGE, 0);
+            for (i = 0; i < pixBytes; i++) {
+                p98__pokeb(seg, (unsigned)(dstOff + i), plane[i]);
+            }
+            p98__outb(P98_PORT_DRAW_PAGE, 1);
+            for (i = 0; i < pixBytes; i++) {
+                p98__pokeb(seg, (unsigned)(dstOff + i), plane[i]);
+            }
+            continue;
         }
-        p98__vram_store_plane(pixOff, p, p98__vram_pix_buf, pixBytes);
+
+        p98__outb(P98_PORT_DRAW_PAGE, 0);
+        for (i = 0; i < pixBytes; i++) {
+            p98__pokeb(seg, (unsigned)(dstOff + i), (unsigned char)(plane[i] & mask[i]));
+        }
+        p98__outb(P98_PORT_DRAW_PAGE, 1);
+        for (i = 0; i < pixBytes; i++) {
+            p98__pokeb(seg, (unsigned)(dstOff + i), (unsigned char)(plane[i] & mask[i]));
+        }
+    }
+}
+
+/* 反転マスク(~spr->mask)を4プレーン(同一内容)へ、ページ0・ページ1の
+ * 両方へ書く。p98_draw_sprite_vram()のパス1(ope=AND)がこの反転マスクで
+ * 「これから描くドットぶんだけ背景を0にする」ために使う。
+ *
+ * p98__vram_upload_pixels()の非opaque経路と同じ理由(2026-09実測)で、
+ * 静的な作業用バッファ+copy_far_to_vram()ではなくp98__pokeb()で直接
+ * 書く(p98__vram_mask_bufという静的バッファは廃止した)。 */
+static void p98__vram_store_inverted_mask(unsigned maskOff, const unsigned char *mask, int pixBytes) {
+    int p, i;
+    unsigned dstOff = (unsigned)(P98_VRAM_STORE_OFF + maskOff);
+
+    for (p = 0; p < 4; p++) {
+        unsigned seg = p98__plane_seg[p];
+        p98__outb(P98_PORT_DRAW_PAGE, 0);
+        for (i = 0; i < pixBytes; i++) {
+            p98__pokeb(seg, (unsigned)(dstOff + i), (unsigned char)~mask[i]);
+        }
+        p98__outb(P98_PORT_DRAW_PAGE, 1);
+        for (i = 0; i < pixBytes; i++) {
+            p98__pokeb(seg, (unsigned)(dstOff + i), (unsigned char)~mask[i]);
+        }
     }
 }
 
@@ -1035,11 +1073,10 @@ static unsigned char p98__vram_is_opaque(const p98_sprite_t *spr, int pixBytes) 
 }
 
 int p98_vram_upload(const p98_sprite_t *spr, p98_vram_sprite_t *out) {
-    int words, rowBytes, pixBytes, i;
+    int words, rowBytes, pixBytes;
     unsigned pixOff, maskOff = 0;
     unsigned char opaque;
     unsigned char curPage;
-    const unsigned char *pixSrc[4];
 
     if (!spr || !out || spr->w <= 0 || spr->h <= 0) return -1;
     if (spr->w % 16 != 0) return -1;
@@ -1062,14 +1099,7 @@ int p98_vram_upload(const p98_sprite_t *spr, p98_vram_sprite_t *out) {
     p98__vram_upload_pixels(pixOff, spr, pixBytes, opaque);
 
     if (!opaque) {
-        /* 反転マスク(~mask)を組み立てて4プレーンへ同じ内容を書く。
-         * p98_draw_sprite_vram()のパス1(ope=AND)がこの反転マスクで
-         * 「これから描くドットぶんだけ背景を0にする」ために使う。 */
-        for (i = 0; i < pixBytes; i++) {
-            p98__vram_mask_buf[i] = (unsigned char)~spr->mask[i];
-        }
-        pixSrc[0] = pixSrc[1] = pixSrc[2] = pixSrc[3] = p98__vram_mask_buf;
-        p98__vram_store_planes(maskOff, pixSrc, pixBytes);
+        p98__vram_store_inverted_mask(maskOff, spr->mask, pixBytes);
     }
 
     p98__outb(P98_PORT_DRAW_PAGE, curPage);
@@ -1085,10 +1115,9 @@ int p98_vram_upload(const p98_sprite_t *spr, p98_vram_sprite_t *out) {
 }
 
 int p98_vram_reupload(p98_vram_sprite_t *vs, const p98_sprite_t *spr) {
-    int words, rowBytes, pixBytes, i;
+    int words, rowBytes, pixBytes;
     unsigned char opaque;
     unsigned char curPage;
-    const unsigned char *pixSrc[4];
 
     if (!vs || !spr || spr->w <= 0 || spr->h <= 0) return -1;
     if (spr->w != vs->w || spr->h != vs->h) return -1;
@@ -1108,11 +1137,7 @@ int p98_vram_reupload(p98_vram_sprite_t *vs, const p98_sprite_t *spr) {
     p98__vram_upload_pixels(vs->pixOff, spr, pixBytes, opaque);
 
     if (!opaque) {
-        for (i = 0; i < pixBytes; i++) {
-            p98__vram_mask_buf[i] = (unsigned char)~spr->mask[i];
-        }
-        pixSrc[0] = pixSrc[1] = pixSrc[2] = pixSrc[3] = p98__vram_mask_buf;
-        p98__vram_store_planes(vs->maskOff, pixSrc, pixBytes);
+        p98__vram_store_inverted_mask(vs->maskOff, spr->mask, pixBytes);
     }
 
     p98__outb(P98_PORT_DRAW_PAGE, curPage);

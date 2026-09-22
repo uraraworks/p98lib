@@ -313,6 +313,8 @@ async function main() {
     spriteExe, spriteNoMaskExe, spriteNoClipExe, spriteBenchExe, spriteBench0Exe,
     spriteEgcExe, spriteEgcBrokenExe, spriteBenchEgcExe,
     spriteVramExe, spriteVramBrokenExe, spriteBenchVramExe,
+    vramUploadBytesExe,
+    vramUploadBenchExe,
     walkExe, walkBrokenExe,
     bgpageExe, bgpageBrokenExe, bgpageBenchFullExe, bgpageBenchDiffExe, bgpageBench0BgExe,
     walk2AssetsExe, walk2AssetsBrokenExe, walk2Exe,
@@ -338,6 +340,8 @@ async function main() {
     buildOrThrow('tests/probe_sprite_vram.c'),
     buildOrThrow('tests/probe_sprite_vram.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_vram_noand.c') }),
     buildOrThrow('tests/probe_sprite_bench_vram.c'),
+    buildOrThrow('tests/probe_vram_upload_bytes.c'),
+    buildOrThrow('tests/probe_vram_upload_bench.c'),
     buildOrThrow('samples/walk.c'),
     buildOrThrow('tests/walk_broken_nobg.c'),
     buildOrThrow('tests/probe_bgpage.c'),
@@ -360,7 +364,7 @@ async function main() {
     buildOrThrow('tests/probe_fkey.c'),
     buildOrThrow('tests/probe_fkey.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_fkey_noshow.c') }),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / probe_sprite_vram / probe_sprite_vram(故障注入=AND転送無し) / probe_sprite_bench_vram / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_tilebg_bench_cpu / probe_tilebg_bench_vram / probe_tilebg_bench0 / probe_state(故障注入=カーソル復帰無し)');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / probe_sprite_vram / probe_sprite_vram(故障注入=AND転送無し) / probe_sprite_bench_vram / probe_vram_upload_bytes / probe_vram_upload_bench / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_tilebg_bench_cpu / probe_tilebg_bench_vram / probe_tilebg_bench0 / probe_state(故障注入=カーソル復帰無し)');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -382,6 +386,8 @@ async function main() {
     spritevram: programFdFor(spriteVramExe, 'PROBE_SV'),
     spritevrambroken: programFdFor(spriteVramBrokenExe, 'PROBE_SV'),
     spritebenchvram: programFdFor(spriteBenchVramExe, 'PROBE_SR'),
+    vramuploadbytes: programFdFor(vramUploadBytesExe, 'PROBE_VB'),
+    vramuploadbench: programFdFor(vramUploadBenchExe, 'PROBE_UB'),
     bgpage: programFdFor(bgpageExe, 'PROBE_BG'),
     bgpagebroken: programFdFor(bgpageBrokenExe, 'PROBE_BG'),
     bgpagebenchfull: programFdFor(bgpageBenchFullExe, 'PROBE_BF'),
@@ -921,6 +927,75 @@ async function main() {
       console.log(`${brokenDetected ? 'OK  ' : 'FAIL'} 故障注入(VRAM AND転送無し) ブロックB dx=0 actual=${eq ? '一致' : '不一致'}`);
     });
 
+    // p98_vram_upload()の一次検査(tests/probe_vram_upload_bytes.c参照): 描画
+    // (EGC転送)を一切経由せず、「VRAM置き場へ書かれたバイト列」を元の
+    // p98_sprite_t(メインメモリ上の絵・マスク)と直接突き合わせる。
+    //
+    // 2026-09、p98.cへ未コミットの変更(1パス転送方式の追加。呼ばれてすら
+    // いない)を加えただけでwalk2(samples/walk2.c)の見た目が変わる不具合が
+    // あり、この検査で原因を「アップロード側」だと確定できた: 非opaqueな
+    // スプライト(マスクに穴がある物)のアップロードで、AND計算した絵を
+    // 一旦メインメモリの静的な作業用バッファへ組み立ててから、その
+    // バッファのアドレスをhuge modelのfar pointerへ変換してcopy_far_to_vram()
+    // へまとめて渡す実装になっており、この「大きい静的配列のアドレスを
+    // far pointer化する」処理が、ライブラリ内の無関係な静的データの増減で
+    // 配置が変わると壊れる(化けた内容を書く)ことが分かった。walk2は
+    // ちょうどこの経路(32x32キャラクター、マスクに穴あり)を使っている。
+    // 修正はp98__vram_upload_pixels()/p98__vram_store_inverted_mask()を
+    // p98__pokeb()による直接書き込みに変更し、この作業用バッファ自体を
+    // 廃止した(src/p98.c参照)。配置が変わっても再発しないことを機械的に
+    // 検出できるよう、この検査を恒久的に追加してある。
+    console.log('\n--- p98_vram_upload()の一次検査 (probe_vram_upload_bytes: VRAM置き場のバイト列が元のp98_sprite_tと一致) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/vramuploadbytes.xdf`, 'PROBE_VB', { waitMs: 4000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+
+      // mag_assets.hから必要な配列をそのままパースする(手写しの誤りを防ぐ)。
+      const magSrc = await readFile(join(REPO_ROOT, 'samples', 'mag_assets.h'), 'utf8');
+      const extractArray = (name) => {
+        const m = magSrc.match(new RegExp(`${name}\\[\\d+\\]\\s*=\\s*\\{([^}]*)\\}`));
+        if (!m) throw new Error(`mag_assets.hに${name}が見つからない`);
+        return m[1].split(',').map((s) => s.trim()).filter(Boolean).map((s) => parseInt(s, 16));
+      };
+      const GROUND = { B: extractArray('MAG_TILE_GROUND_B'), R: extractArray('MAG_TILE_GROUND_R'), G: extractArray('MAG_TILE_GROUND_G'), I: extractArray('MAG_TILE_GROUND_I') };
+      const ACCENT = { B: extractArray('MAG_TILE_ACCENT_B'), R: extractArray('MAG_TILE_ACCENT_R'), G: extractArray('MAG_TILE_ACCENT_G'), I: extractArray('MAG_TILE_ACCENT_I') };
+      const CHAR = { B: extractArray('MAG_WALK_DOWN_P0_B'), R: extractArray('MAG_WALK_DOWN_P0_R'), G: extractArray('MAG_WALK_DOWN_P0_G'), I: extractArray('MAG_WALK_DOWN_P0_I'), M: extractArray('MAG_WALK_DOWN_M0') };
+
+      // VRAM置き場(P98_VRAM_STORE_OFF=32000起点)のオフセットはp98__vram_alloc()の
+      // 単純なバンプ割り当て(need=bytes+2)から決まる(probe_vram_upload_bytes.c
+      // 冒頭のコメント参照): 1.MAG_TILE_GROUND pixOff=0 2.MAG_TILE_ACCENT
+      // pixOff=34 3.MAG_WALK_DOWN[0] pixOff=68 / maskOff=198。
+      const STORE = 32000;
+      const readStorePlane = async (key, off, len) => page.evaluate(
+        (addr, len) => window.p98probe.readMemory(addr, len), PLANE[key] + STORE + off, len,
+      );
+      const readStoreAll = async (off, len) => {
+        const out = {};
+        for (const key of ['B', 'R', 'G', 'I']) out[key] = await readStorePlane(key, off, len);
+        return out;
+      };
+
+      const groundActual = await readStoreAll(0, 32);
+      const accentActual = await readStoreAll(34, 32);
+      const charPixActual = await readStoreAll(68, 128);
+      const charMaskActual = await readStoreAll(198, 128);
+
+      for (const key of ['B', 'R', 'G', 'I']) {
+        assertEqual(`[VRAM一次検査] ground置き場.${key}が元データと一致`, groundActual[key], GROUND[key], results);
+      }
+      for (const key of ['B', 'R', 'G', 'I']) {
+        assertEqual(`[VRAM一次検査] accent置き場.${key}が元データと一致`, accentActual[key], ACCENT[key], results);
+      }
+      for (const key of ['B', 'R', 'G', 'I']) {
+        const expected = CHAR[key].map((v, i) => v & CHAR.M[i]);
+        assertEqual(`[VRAM一次検査] char置き場(絵&マスク).${key}が元データと一致`, charPixActual[key], expected, results);
+      }
+      for (const key of ['B', 'R', 'G', 'I']) {
+        const expected = CHAR.M.map((v) => (~v) & 0xFF);
+        assertEqual(`[VRAM一次検査] char置き場(反転マスク).${key}が元データと一致`, charMaskActual[key], expected, results);
+      }
+    });
+
     console.log('\n--- 故障注入: probe_sprite(マスク無し版)はFAILするはず ---');
     await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
       await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/spritenomask.xdf`, 'PROBE_SP', { waitMs: 3000 }), PORT);
@@ -991,6 +1066,12 @@ async function main() {
       });
       console.log(ok ? 'OK   スプライト速度のA/B比較が完了' : 'FAIL スプライト速度のA/B比較に失敗(差分が0以下)');
     }
+
+    // (p98_vram_reupload()のアップロード自体のコストを測るA/B比較は、walk2の
+    // 固定sleep(15000ms)を圧迫しないよう、このファイル末尾(walk2を含む
+    // 全検査より後ろ)へ置いてある。2026-09、1パス方式の速度A/B比較を
+    // ここに置いていた際に同じ理由でwalk2側がFAILする実測結果になったため
+    // 末尾へ移した経緯があり、その教訓を踏襲した。)
 
     console.log('\n--- 陽性対照: スプライト速度ベンチ(VRAM経路)が実際に描画していることの確認 ---');
     {
@@ -1460,7 +1541,29 @@ async function main() {
       // 見積もると、この初期化だけで7秒前後かかる。3秒程度で読みに行くと
       // 「まだ何も描かれていない/描画途中」を「壊れている」と誤検出したため
       // (最初にこの節を書いたときに実際に踏んだ)、十分に余裕を見て待つ。
-      await sleep(15000);
+      //
+      // 【2026-09追記】固定15秒待ちだと、ホスト(このマシン)が他の処理で
+      // 混んでいる時にエミュレーションが実時間に対して遅れ、15秒経っても
+      // 初期化(2000回描画)が終わっていないことがある(walk.cの節にある
+      // readManyStableと同種の問題。p98lib側のコード変更が原因ではなく、
+      // 「ホストの実時間とゲストの処理速度が結びついていない」という
+      // このエミュレータ実行環境そのものの性質。tools/verify.mjsに
+      // p98_vram_upload_1pass等の検査を追加してからこの節がまれに
+      // FAILするようになった実測で発覚した)。walk.cのreadManyStableほど
+      // 厳密ではないが、「起動直後の期待値に一致するまで」最大90秒
+      // ポーリングして、ホスト負荷のばらつきを吸収する。
+      {
+        const deadline = Date.now() + 90000;
+        let waited = 0;
+        for (;;) {
+          const probe = await readVramRect(page, START_X, START_Y, 32, 32);
+          const expectedProbe = expectedComposite(START_X, START_Y, expectedFrame('DOWN', START_X, START_Y));
+          if (rectPlanesEqual(probe, expectedProbe) || Date.now() >= deadline) break;
+          await sleep(2000);
+          waited += 2000;
+        }
+        console.log(`[walk2] 起動直後の安定待ち: 約${waited}ms(ポーリングで一致確認/タイムアウト)`);
+      }
 
       // readVramRectは1回の読み取りが安定している前提(probe_*系と同様、
       // 直前のキー操作からの待ち時間を確保して安定させる。walk.cの節にある
@@ -1677,6 +1780,71 @@ async function main() {
       results.push({ label: '[陽性対照] タイル敷き詰め速度ベンチ: VRAM経路の最終描画結果がCPU経路と一致(実際に同じ絵を描いている)', ok: vramMatchesCpu, actual: vramMatchesCpu ? '一致' : '不一致', expected: '一致' });
       console.log(`${vramMatchesCpu ? 'OK  ' : 'FAIL'} [陽性対照] タイル敷き詰め速度ベンチ VRAM経路がCPU経路と一致`);
     }
+
+    // =====================================================================
+    // p98_vram_reupload()(アップロードそのもの)のコストの計測(2026-09)。
+    // あえてこのファイルの最後尾(walk2を含む全ての既存検査より後ろ)に
+    // 置いてある: 以前ここに1パス転送方式(EGCマスクレジスタで透明ドットを
+    // 抜く方式。実測で2パス方式の約0.27倍=約3.7倍遅いと分かり撤去した。
+    // docs/design.md参照)の検査を置いていた際、「スプライト・VRAM常駐+
+    // EGC転送経路」節・「スプライト速度のA/B比較」節の直後に置くと
+    // ホスト側の累積負荷が増え、walk2(samples/walk2.c)の固定sleep
+    // (15000ms、実時間ベースでホストの実際の処理速度に依存する作り)が
+    // 実質的に不足してFAILすることを実測した(feedback_probe_perturbs_
+    // the_subjectと同種の「計測(を増やすこと)が対象を変える」現象)。
+    // 同じ教訓を踏まえ、このアップロードコスト計測もファイル末尾に置く。
+    // =====================================================================
+
+    console.log('\n--- p98_vram_reupload()のアップロードコスト計測 (probe_vram_upload_bench) ---');
+    // p98__copy_far_to_vram()(まとめてrep movsb)を撤去し、p98__pokeb()に
+    // よる1バイトずつの直接書き込みへ寄せた(docs/design.md「配置依存の
+    // 不具合」節参照)ことで、アップロード自体は遅くなっているはず。
+    // walk2はコマが変わるたびにp98_vram_reupload()で置き直しているため、
+    // そのコストを知っておく必要がある。
+    //
+    // 32x32・マスクに穴がある(非opaque)スプライトをN回(tests/
+    // probe_vram_upload_bench.cのBENCH_N*BENCH_ITERS=100回)
+    // p98_vram_reupload()するだけのベンチを、既に計測済みのbaseMs
+    // (probe_sprite_bench0.c、init/flip/clear/quitの固定オーバーヘッド
+    // のみ)との差分で測る。計測方法(ホスト側performance.now()の差分、
+    // 3回計測して中央値)はprobe_sprite_bench*.cと完全に同一。
+    // 比較対象(別方式)は無いので比は出さない。「1回あたり何ms」と、
+    // 「CPU経路でスプライトを1体描く(cpuPerSpriteMs、上の「スプライト
+    // 速度のA/B比較」節で計測済みのcpuMs/baseMsから再計算)のと比べて
+    // どうか」が分かる形にする。
+    const UPLOAD_BENCH_N = 100; // tests/probe_vram_upload_bench.c の BENCH_N*BENCH_ITERS と一致させる
+    const uploadBenchMs = await measureRunTimes('vramuploadbench', 'PROBE_UB');
+    {
+      const cpuPerSpriteMsAgain = (cpuMs - baseMs) / SPRITE_BENCH_N;
+      const uploadPerCallMs = (uploadBenchMs - baseMs) / UPLOAD_BENCH_N;
+      console.log(`中央値: baseline=${baseMs.toFixed(0)}ms, アップロード${UPLOAD_BENCH_N}回=${uploadBenchMs.toFixed(0)}ms`);
+      console.log(`p98_vram_reupload(): 1回あたり約${uploadPerCallMs.toFixed(3)}ms`);
+      console.log(`(参考)CPU経路でスプライト(16x16)を1体描く: 1体あたり約${cpuPerSpriteMsAgain.toFixed(3)}ms`);
+      console.log(`比(アップロード1回/CPU経路1体描画): ${(uploadPerCallMs / cpuPerSpriteMsAgain).toFixed(2)}倍`);
+      console.log('注意: 数値が期待通りでなくても実装を作り直さず、出た値をそのまま記録する方針(feedback_control_and_fault_injection.md)。これもnp2kai(WebNP2)+puppeteerというこの実行環境全体を通した相対値であり、実機での比率とは限らない。');
+      const ok = Number.isFinite(uploadPerCallMs) && uploadPerCallMs > 0;
+      results.push({
+        label: 'p98_vram_reupload()のアップロードコスト計測が完了(具体的な数値は合否判定の対象ではない。docs/verify-log.md参照)',
+        ok, actual: `1回あたり約${uploadPerCallMs.toFixed(3)}ms`, expected: '正の値が計測できていること',
+      });
+      console.log(ok ? 'OK   アップロードコスト計測が完了' : 'FAIL アップロードコスト計測に失敗(差分が0以下)');
+    }
+
+    console.log('\n--- 陽性対照: アップロードコストベンチが実際にVRAMへ書いていることの確認 ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      // tests/probe_vram_upload_bench.cの1回目のp98_vram_upload()は
+      // 起動直後(p98_vram_reset()を呼んでいないため常に先頭)なので、
+      // pixOff=0のはず(p98__vram_alloc()の単純なバンプ割り当て)。
+      // Bプレーン(青、g_plane0=全バイト0xFF)の先頭バイトは、非opaqueな
+      // ので「絵&マスク」= 0xFF & 0x7E(g_maskの各行先頭バイト)= 0x7Eに
+      // なるはず(何も書いていなければVRAM初期値の0のまま)。
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/vramuploadbench.xdf`, 'PROBE_UB', { waitForExit: true }), PORT);
+      if (errors.length) console.log('page errors(vramuploadbench):', errors);
+      const storeB = await page.evaluate((addr, len) => window.p98probe.readMemory(addr, len), PLANE.B + 32000, 1);
+      const ok = storeB[0] === 0x7E;
+      results.push({ label: '[陽性対照] アップロードコストベンチ: 置き場(pixOff=0)のBプレーン先頭バイトが期待値(絵&マスク=0x7E)と一致(実際に書いている)', ok, actual: `0x${storeB[0]?.toString(16)}`, expected: '0x7e' });
+      console.log(`${ok ? 'OK  ' : 'FAIL'} [陽性対照] アップロードコストベンチ 置き場の内容確認 actual=0x${storeB[0]?.toString(16)}`);
+    });
   } finally {
     await browser.close();
     await rm(profile, { recursive: true, force: true });

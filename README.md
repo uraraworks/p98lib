@@ -88,7 +88,7 @@ node tools/verify.mjs
 ```
 
 WebNP2(NP2kai)+FreeDOS(98)上で実際にプローブプログラムを走らせ、VRAM/TVRAMの実バイト値で
-判定する211項目の検証です(故障注入込み。詳細・実測結果は `docs/verify-log.md`)。
+判定する229項目の検証です(故障注入込み。詳細・実測結果は `docs/verify-log.md`)。
 puppeteer 経由でヘッドレスブラウザを起動するため、実行環境によっては `CHROME_PATH`
 環境変数でChromeの実行ファイルパスを指定してください。
 

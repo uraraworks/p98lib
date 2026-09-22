@@ -92,36 +92,22 @@ _p98__egc_row:
     o32 leave
     retf
 
-; p98__copy_far_to_vram(seg, dstOff, srcPtr, byteCount) : void
-;   huge modelのfarポインタsrcPtrから seg:dstOff (VRAM) へ byteCount バイトを
-;   rep movsbでコピーする(p98_vram_upload()の絵/マスクアップロード用。
-;   普通のCPU書き込みでEGCは使わない)。
-;   srcPtrはCの引数としては4バイトスロット1個そのものが「オフセット16bit+
-;   セグメント16bit」の実体になっている(x86のfarポインタのメモリ上表現と
-;   同じ並び)ので、lds si,[bp+16] で直接ds:siへ読み込める。
-;   ds:si をそのまま使うと、その後 mov ax,[bp+8] 等でdsを書き換えるため、
-;   65536バイト境界をまたぐfarポインタ対策として ds:si を「正規化」
-;   (si>>4をセグメントへ足し込み、siは下位4bitだけ残す)してから使う
-;   (このライブラリの他のfarポインタ越しコピーが無いため今回新規に採用。
-;   通常のrep movsbはセグメント境界をまたげないためこの正規化が必要)。
-    global _p98__copy_far_to_vram
-_p98__copy_far_to_vram:
-    push    ebp
-    movzx   ebp, sp
-    push    ds
-    lds     si, [bp+16]     ; ds:si = srcPtr (far pointer: offset,segment の並び)
-    mov     ax, si
-    shr     ax, 4
-    mov     bx, ds
-    add     bx, ax
-    mov     ds, bx
-    and     si, 15
-    mov     ax, [bp+8]      ; dst seg
-    mov     es, ax
-    mov     di, [bp+12]     ; dstOff
-    mov     cx, [bp+20]     ; byteCount
-    cld
-    rep     movsb
-    pop     ds
-    o32 leave
-    retf
+; 2026-09、_p98__egc_row_masked(EGCマスクレジスタを毎ワード書き直す
+; 1パス転送方式用)と_p98__copy_far_to_vram(Cのポインタをfar pointer化して
+; VRAMへrep movsbするプリミティブ)はいずれも撤去した。
+;
+; _p98__egc_row_masked: 1パス方式(絵だけをVRAMへ置き、透明ドットの選別を
+; EGCマスクレジスタ側で行う)自体を、2パス方式(現存のp98_vram_upload/
+; p98_draw_sprite_vram)の約0.27倍(約3.7倍遅い)という実測(毎ワードの
+; OUTが挟まるため rep movsw が使えなくなるのが主因)により不採用と
+; 判断し、p98.c/include/p98.h側の呼び出し元ごと削除したため不要になった。
+;
+; _p98__copy_far_to_vram: Cの大きい静的配列のアドレスをhuge modelの
+; far pointerへ変換してVRAMへ渡す処理が、ライブラリ内の無関係な静的
+; データの増減で配置が変わると壊れる(無関係なメモリを読む)ことが
+; 分かったため撤去した(docs/design.md「配置依存の不具合」節参照)。
+; 呼び出し元(p98.cのVRAMアップロード全経路)はp98__pokeb()による
+; 1バイトずつの直接書き込みへ置き換えてあり、Cのポインタをこのファイルへ
+; far pointerとして渡す経路はこのライブラリから無くなっている。
+;
+; 経緯の詳細はdocs/design.md・docs/verify-log.md参照。

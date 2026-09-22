@@ -259,11 +259,11 @@ void p98_draw_sprite_diff(const p98_sprite_t *spr, int x, int y);
 #define P98_VRAM_STORE_SIZE 768
 
 typedef struct {
-    const p98_sprite_t *src;  /* 横方向クリップ時にCPU経路へ戻すため保持 */
+    const p98_sprite_t *src;  /* 横方向クリップ時にCPU経路へ戻すため保持。 */
     int w, h;
     int words;                /* 1行のワード数 = w/16 */
     unsigned pixOff;          /* 絵の先頭オフセット(P98_VRAM_STORE_OFFからの相対) */
-    unsigned maskOff;         /* 反転マスクの先頭(opaque時は未使用) */
+    unsigned maskOff;         /* 反転マスクの先頭(opaque=0の時だけ使用) */
     unsigned char opaque;     /* 1=全ドット不透明(マスクを使わない) */
 } p98_vram_sprite_t;
 
@@ -302,5 +302,13 @@ void p98_draw_sprite_vram(const p98_vram_sprite_t *vs, int x, int y);
  * 共有する。P98_RENDER_BGPAGEモードでない場合はp98_draw_sprite_vram()へ
  * フォールバックする。 */
 void p98_draw_sprite_vram_diff(const p98_vram_sprite_t *vs, int x, int y);
+
+/* ---- EGCマスクレジスタによる1パス転送について(2026-09、試して落とした) ----
+ * 置き場に「絵」だけを置き、透明ドットの選別をEGCマスクレジスタ(0x4A8)
+ * 側で毎ワード行う1パス方式を試作・実測したが、2パス方式(上記
+ * p98_vram_upload/p98_draw_sprite_vram)の約0.27倍(約3.7倍遅い)という
+ * 結果になったため撤去した。VRAM消費が半分で済む利点はあるが、
+ * 現状は使わない。経緯・実測値・再開に要る情報はdocs/design.md参照。
+ */
 
 #endif /* P98_H */

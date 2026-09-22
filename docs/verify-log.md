@@ -1657,3 +1657,119 @@ VRAM/EGC経路: 1枚あたり約0.184ms ≈ 約5434枚/秒
   -2を返す)は、`tests/probe_tilebg_bench_vram.c`のコメントにある通り
   正常系では発生しない前提で作られており、容量不足時のフォールバック
   (CPU経路への切り替え等)は呼び出し側の責務のまま。
+
+## 20. 1パス転送方式の試作・撤去、配置依存の不具合の修正、アップロードコストの実測(2026-09-22)
+
+19節のVRAM常駐+EGC本転送(2パス方式)の後、比較用にEGCマスクレジスタで
+透明ドットを抜く「1パス方式」(`p98_vram_upload_1pass`/
+`p98_draw_sprite_vram_1pass`)を試作した。あわせて、`p98_vram_upload()`の
+アップロード経路(`p98__copy_far_to_vram`、大きい静的配列のアドレスを
+far pointer化してVRAMへ`rep movsb`するasmプリミティブ)に、ライブラリ内の
+無関係な静的データの増減で配置が変わると壊れる不具合が見つかり、
+修正した。本節はこの一連の実測・修正・後始末の記録。
+
+### 20-1. 1パス方式のA/B速度比較(撤去前、本節の作業に着手した時点で既に得られていた実測結果)
+
+`tests/probe_sprite_bench_vram.c`と完全に同一条件(スプライト40x50=2000本、
+同一ベースライン`probe_sprite_bench0.c`)で、2パス方式
+(`p98_draw_sprite_vram`)と1パス方式(`p98_draw_sprite_vram_1pass`)を
+A/B比較した結果(この結果を根拠に撤去を判断したため、撤去後の本節では
+再計測していない):
+
+```
+2パス方式(p98_draw_sprite_vram): 約4636体/秒(1体あたり約0.216ms)
+1パス方式(p98_draw_sprite_vram_1pass): 2パス方式の約0.27倍(約3.7倍遅い)
+```
+
+1パス方式は毎ワードの転送でEGCマスクレジスタへ2回のOUT(下位・上位
+バイト)を挟む必要があり、`rep movsw`が使えず1ワードずつ`movsw`単体を
+呼ぶことになるのが主因(`docs/design.md`「試して落とした経路」節参照)。
+CPU経路との等価性(透明ドットの扱いを含む)は確認済みで、方式自体は
+正しく動いていた。VRAM消費が半分になる利点はあるが、現状の
+768バイト/プレーンという置き場の制約下では2パス方式で足りているため、
+速度低下と釣り合わないと判断し、実装ごと撤去した
+(`p98_vram_upload_1pass`/`p98_draw_sprite_vram_1pass`/
+`p98__egc_row_masked`/`tests/probe_sprite_vram_1pass.c`/
+`tests/probe_sprite_bench_vram_1pass.c`を削除。`tools/verify.mjs`の
+対応する検査節も削除した)。
+
+### 20-2. 配置依存の不具合と修正
+
+`p98_vram_upload()`の非opaque経路(透明ドットのあるスプライト)は、
+`plane[i]&mask[i]`を計算してメインメモリの静的な作業用バッファへ
+組み立て、そのバッファのアドレスをhuge modelのfar pointerへ変換して
+`p98__copy_far_to_vram()`へ渡す実装だった。opaque経路(不透明スプライト)
+も同じ`p98__copy_far_to_vram()`を、`spr->planes[p]`のアドレスを直接
+far pointer化して呼んでいた。
+
+1パス方式のコードを追加した(呼ばれてすらいない)だけで`samples/walk2.c`の
+見た目が変わる不具合が見つかり、`tests/probe_vram_upload_bytes.c`
+(描画を経由せず、VRAM置き場のバイト列を元の`p98_sprite_t`と直接突き
+合わせる一次検査)で「アップロード側」の不具合だと確定した。正体は
+「大きい静的配列のアドレスをfar pointerへ変換する」処理が、ライブラリ
+内の無関係な静的データの増減で配置が変わると壊れ、DOSの環境ブロック
+相当の無関係なメモリを読んでしまうというものだった(詳細は
+`docs/design.md`「配置依存の不具合」節)。
+
+修正は、`p98_vram_upload()`のアップロード全経路(opaque・非opaqueとも)を
+`p98__pokeb()`による1バイトずつの直接書き込みへ寄せ、
+`p98__copy_far_to_vram()`(および1パス方式用の`p98__egc_row_masked()`)を
+呼び出し元ごと撤去した(`src/p98_asm.asm`からもasm実装を削除)。
+`tests/p98_broken_vram_noand.c`(故障注入版、`src/p98.c`の全体コピー)も
+同じ理由で`_p98__copy_far_to_vram`が未定義になったため、修正後の
+`src/p98.c`から同じ故障注入(`if (!vs->opaque)`→`if (0 && !vs->opaque)`)を
+再度施して作り直した。
+
+`tests/probe_vram_upload_bytes.c`(一次検査)は恒久的な検査として残して
+あり、修正後も含めて全実行で一致を確認している。
+
+### 20-3. アップロードコストの実測(修正後、`probe_vram_upload_bench`)
+
+`p98__pokeb()`による1バイトずつの書き込みへ寄せたことで、アップロード
+自体は(まとめて`rep movsb`していた頃より)遅くなっているはず。walk2は
+コマが変わるたびに`p98_vram_reupload()`で置き直しているため、そのコストを
+実測した。32x32・マスクに穴がある(非opaque)スプライトを100回
+(`tests/probe_vram_upload_bench.c`のBENCH_N×BENCH_ITERS=20×5)
+`p98_vram_reupload()`するだけのベンチを、既存のベースライン
+(`probe_sprite_bench0.c`)との差分で測った。`node tools/verify.mjs`
+実行結果(2026-09-22):
+
+```
+--- p98_vram_reupload()のアップロードコスト計測 (probe_vram_upload_bench) ---
+vramuploadbenchの実行時間: [1247, 1167, 1056]ms
+中央値: baseline=211ms, アップロード100回=1167ms
+p98_vram_reupload(): 1回あたり約9.559ms
+(参考)CPU経路でスプライト(16x16)を1体描く: 1体あたり約3.779ms
+比(アップロード1回/CPU経路1体描画): 2.53倍
+```
+
+32x32・非opaqueのスプライト1回の`p98_vram_reupload()`は、16x16の
+スプライトをCPU経路(`p98_draw_sprite`)で1体描くのと比べて約2.53倍の
+コスト。walk2のキャラクターは(現在の使い方では)コマが変わった
+フレームだけ`p98_vram_reupload()`を呼ぶため、常時発生するコストでは
+ないが、無視できない大きさである。陽性対照として、ベンチ実行後に
+VRAM置き場(pixOff=0、Bプレーン先頭バイト)の内容が期待値
+(絵&マスク=0xFF&0x7E=0x7E)と一致することを確認済み(実際に書いて
+いることの確認)。
+
+### 20-4. 修正後の検証結果
+
+`node tools/verify.mjs`: **229/229 OK(FAIL 0・SKIP 0)。**
+
+### 20-5. 未確認・既知の限界
+
+- 「大きい静的配列のアドレスをhuge modelのfar pointerへ変換すると、
+  配置によっては壊れた値になる」という現象そのものの根本原因
+  (SmallerC側のコード生成か、WorkbenchNP2のhuge model対応側か)は
+  特定していない。回避策(Cのポインタをasmへfar pointerとして渡す
+  経路を使わない)に留めており、トゥールチェーン側は未調査。
+- アップロードコストの実測値(9.559ms/回)は、他の速度比較と同じく
+  np2kai(WebNP2)+puppeteerというこの実行環境全体を通した値であり、
+  実機での値とは限らない。
+- 1パス方式の実測(20-1、約0.27倍)は撤去前の実行分であり、本節
+  20-3〜20-4の修正(pokeb化)より前の`p98_draw_sprite_vram`(2パス
+  方式)を基準にしている。修正はアップロード側(`p98_vram_upload`/
+  `p98_vram_reupload`)のみでpokeb化しており、描画側
+  (`p98_draw_sprite_vram`のEGC転送そのもの)は変更していないため、
+  この2パス方式の描画速度自体への影響は無いはずだが、1パス方式の
+  再実装・再計測は行っていない。
