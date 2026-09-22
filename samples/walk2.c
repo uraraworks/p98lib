@@ -19,6 +19,12 @@
  *
  * 描画方式: p98_init_bgpage() + 背景ページへタイルを1回だけ敷き詰め、
  * 以後は差分復帰でキャラだけを動かす(docs/design.md「背景ページ+差分復帰」参照)。
+ * 画面ページへの反映は、背景ページへ敷いた内容をp98_copy_bgpage_to_screen()で
+ * まるごとコピーする(2026-09後半、docs/design.md「背景ページ→画面ページの
+ * まるごとコピー」節参照)。以前はdraw_tiled_background()を背景・画面へ
+ * それぞれ1回ずつ計2回呼んでいたが、A/B実測でコピー方式の方が約1.85倍
+ * 速いと分かったため載せ替えた(タイル敷き詰め自体をもう1回行う方が、
+ * コピーの「1ワードごとにポート切替2回」より遅かった、という実測)。
  * 2026-09後半、EGC本転送(VRAM置き場常駐、include/p98.h「EGCによる本来の
  * スプライト転送」参照)へ載せ替えた:
  *   - タイル2種(16x16・全ドット不透明)は起動時に p98_vram_upload() で
@@ -168,8 +174,11 @@ int main(void) {
     p98_set_draw_target(P98_TARGET_BACKGROUND);
     draw_tiled_background(tilesVram, &vsTileGround, &vsTileAccent);
 
+    /* 画面ページへは同じ敷き詰めをもう一度行わず、背景ページの内容を
+     * まるごとコピーする(タイル・座標がVRAM/CPUどちらの経路で描いたかに
+     * よらず、コピーは常に正しい。上のファイル冒頭コメント参照)。 */
     p98_set_draw_target(P98_TARGET_SCREEN);
-    draw_tiled_background(tilesVram, &vsTileGround, &vsTileAccent);
+    p98_copy_bgpage_to_screen();
 
     /* 歩数カウンタ(step++)を廃止し、位置からコマを決める方式にした。
      * 押しっぱなし移動(p98_key_down)にすると「何歩進んだか」は何フレーム

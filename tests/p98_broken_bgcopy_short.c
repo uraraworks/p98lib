@@ -1,4 +1,12 @@
 /*
+ * ★故障注入版(tests/p98_broken_bgcopy_short.c)★
+ * src/p98.c のコピーに対し、p98_copy_bgpage_to_screen()がコピーする
+ * ワード数を末尾1行ぶん(P98_BYTES_PER_LINE/2ワード=40ワード)だけ
+ * 少なくしてある(画面最下行がコピーされないまま終わる)。
+ * docs/verify-log.mdの陰性対照(「コピー後は背景ページと完全一致する」
+ * 検査自体がFAILを検出できることの確認)専用。通常のビルド・配布物には
+ * 含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -950,7 +958,13 @@ void p98_copy_bgpage_to_screen(void) {
     p98__egc_outw(0x4AC, 0x0000); /* sft: srcbit=dstbit=0(バイト境界に揃っている) */
     p98__egc_outw(0x4AE, 0x000F); /* leng: 1ワード分 */
 
-    wordCount = (unsigned)((P98_BYTES_PER_LINE * P98_SCREEN_H) / 2);
+    /* ★故障注入(tests/p98_broken_bgcopy_short.c)★
+     * 本来は画面全体(P98_BYTES_PER_LINE*P98_SCREEN_H/2ワード)をコピーする
+     * ところ、末尾1行ぶん(P98_BYTES_PER_LINE/2ワード)を減らしてある。
+     * tools/verify.mjsの陰性対照(「コピー後は背景ページと完全一致する」
+     * 検査自体がFAILを検出できることの確認)専用。通常のビルド・配布物には
+     * 含めない。 */
+    wordCount = (unsigned)((P98_BYTES_PER_LINE * P98_SCREEN_H) / 2) - (unsigned)(P98_BYTES_PER_LINE / 2);
     p98__egc_copy_page((unsigned)P98_SEG_PLANE_B, 0, 0, wordCount, p98__bg_page, p98__screen_page);
 
     p98__outb(0x7C, 0x00); /* 使い終わったら必ず戻す */

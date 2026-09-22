@@ -226,6 +226,19 @@ void p98_set_draw_target(p98_draw_target_t target);
  */
 void p98_draw_sprite_diff(const p98_sprite_t *spr, int x, int y);
 
+/* 背景ページの内容を画面ページへ丸ごとコピーする(2026-09、docs/design.md
+ * 「背景ページ→画面ページのまるごとコピー」節参照)。EGCのVRAM→VRAM転送を
+ * 使い、画面全体(400行×80バイト)を1回のfar call(p98__egc_copy_page())で
+ * コピーする。P98_RENDER_BGPAGEモードでないとき(p98_init_bgpage()を
+ * 呼んでいないとき)は何もしない。
+ * 「背景を作り直したときに画面へ反映する」用途を想定している
+ * (draw_tiled_background()のような重い背景の敷き詰めを画面ページへも
+ * 二重に行う代わりに、背景ページへ1回だけ敷いてこちらでコピーする)。
+ * 速いかどうかはA/B実測が前提(docs/design.md・docs/verify-log.md参照。
+ * 「まるごとコピー」は1ワードごとにページ切替のOUTが2回要るため、必ず
+ * タイル敷き詰め自体より速いとは限らない)。 */
+void p98_copy_bgpage_to_screen(void);
+
 /* ---- EGCによる本来のスプライト転送(2026-09後半、docs/design.md参照) ----
  *
  * p98_draw_sprite()/p98_draw_sprite_diff()は1バイト単位のCPU read-modify-write

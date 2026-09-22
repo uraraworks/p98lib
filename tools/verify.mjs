@@ -322,6 +322,7 @@ async function main() {
     tilebgBenchCpuExe, tilebgBenchVramExe, tilebgBench0Exe,
     stateCursorBrokenExe, cursorExe, cursorBrokenExe,
     fkeyExe, fkeyBrokenExe,
+    bgcopyExe, bgcopyBrokenExe, bgcopyBench2xExe, bgcopyBenchCopyExe, bgcopyBench0Exe,
   ] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
@@ -363,8 +364,13 @@ async function main() {
     buildOrThrow('tests/probe_cursor.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_cursor_noshow.c') }),
     buildOrThrow('tests/probe_fkey.c'),
     buildOrThrow('tests/probe_fkey.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_fkey_noshow.c') }),
+    buildOrThrow('tests/probe_bgcopy.c'),
+    buildOrThrow('tests/probe_bgcopy.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_bgcopy_short.c') }),
+    buildOrThrow('tests/probe_bgcopy_bench_2x.c'),
+    buildOrThrow('tests/probe_bgcopy_bench_copy.c'),
+    buildOrThrow('tests/probe_bgcopy_bench0.c'),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / probe_sprite_vram / probe_sprite_vram(故障注入=AND転送無し) / probe_sprite_bench_vram / probe_vram_upload_bytes / probe_vram_upload_bench / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_tilebg_bench_cpu / probe_tilebg_bench_vram / probe_tilebg_bench0 / probe_state(故障注入=カーソル復帰無し)');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / probe_sprite_vram / probe_sprite_vram(故障注入=AND転送無し) / probe_sprite_bench_vram / probe_vram_upload_bytes / probe_vram_upload_bench / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_tilebg_bench_cpu / probe_tilebg_bench_vram / probe_tilebg_bench0 / probe_state(故障注入=カーソル復帰無し) / probe_bgcopy / probe_bgcopy(故障注入=末尾1行コピー漏れ) / probe_bgcopy_bench_2x / probe_bgcopy_bench_copy / probe_bgcopy_bench0');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -407,6 +413,11 @@ async function main() {
     tilebgbenchcpu: programFdFor(tilebgBenchCpuExe, 'PROBE_TC'),
     tilebgbenchvram: programFdFor(tilebgBenchVramExe, 'PROBE_TV'),
     tilebgbench0: programFdFor(tilebgBench0Exe, 'PROBE_T0'),
+    bgcopy: programFdFor(bgcopyExe, 'PROBE_CB'),
+    bgcopybroken: programFdFor(bgcopyBrokenExe, 'PROBE_CB'),
+    bgcopybench2x: programFdFor(bgcopyBench2xExe, 'PROBE_C2'),
+    bgcopybenchcopy: programFdFor(bgcopyBenchCopyExe, 'PROBE_CC'),
+    bgcopybench0: programFdFor(bgcopyBench0Exe, 'PROBE_C0'),
   };
 
   const server = await startServer(programFds);
@@ -1779,6 +1790,128 @@ async function main() {
       const vramMatchesCpu = rectPlanesEqual(vram, cpu);
       results.push({ label: '[陽性対照] タイル敷き詰め速度ベンチ: VRAM経路の最終描画結果がCPU経路と一致(実際に同じ絵を描いている)', ok: vramMatchesCpu, actual: vramMatchesCpu ? '一致' : '不一致', expected: '一致' });
       console.log(`${vramMatchesCpu ? 'OK  ' : 'FAIL'} [陽性対照] タイル敷き詰め速度ベンチ VRAM経路がCPU経路と一致`);
+    }
+
+    // =====================================================================
+    // 背景ページ→画面ページのまるごとコピー(p98_copy_bgpage_to_screen()、
+    // 2026-09後半、docs/design.md参照)の正しさ・A/B速度比較。
+    // =====================================================================
+
+    // 背景ページに描いたのと同じパターンをNode側で独立に組み立てる
+    // (probe_bgcopy.cのdraw_background_pattern()と完全に同じ矩形列。
+    // 期待値の計算経路と検証対象(WebNP2上のVRAM実値)を別経路にするため、
+    // 検証対象からのコピーではなくp98_fill_rectの塗り方を独立に再実装する)。
+    function buildBgCopyExpectedPlanes() {
+      const w = 640, h = 400, wBytes = 80;
+      const bitIndex = { B: 0, R: 1, G: 2, I: 3 };
+      const buffers = { B: Buffer.alloc(wBytes * h, 0), R: Buffer.alloc(wBytes * h, 0), G: Buffer.alloc(wBytes * h, 0), I: Buffer.alloc(wBytes * h, 0) };
+      function fillRect(x, y, rw, rh, color) {
+        const byteX = x / 8, byteW = rw / 8; // このプローブの矩形は全てバイト境界に揃えてある
+        for (const plane of ['B', 'R', 'G', 'I']) {
+          const val = (color & (1 << bitIndex[plane])) ? 0xFF : 0x00;
+          for (let row = y; row < y + rh; row++) {
+            for (let bx = 0; bx < byteW; bx++) buffers[plane][row * wBytes + byteX + bx] = val;
+          }
+        }
+      }
+      fillRect(0, 0, 640, 4, 10);
+      fillRect(0, 200, 640, 8, 5);
+      fillRect(200, 100, 64, 32, 12);
+      fillRect(0, 396, 640, 4, 9);
+      return { w, h, wBytes, planes: [buffers.B, buffers.R, buffers.G, buffers.I] };
+    }
+    function buildUniformColorPlanes(color) {
+      const w = 640, h = 400, wBytes = 80;
+      const bitIndex = { B: 0, R: 1, G: 2, I: 3 };
+      const planes = ['B', 'R', 'G', 'I'].map((plane) => Buffer.alloc(wBytes * h, (color & (1 << bitIndex[plane])) ? 0xFF : 0x00));
+      return { w, h, wBytes, planes };
+    }
+
+    console.log('\n--- 背景ページ→画面ページのまるごとコピー(probe_bgcopy: コピー後の画面が背景と完全一致) ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/bgcopy.xdf`, 'PROBE_CB', { waitMs: 2000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+
+      const expected = buildBgCopyExpectedPlanes();
+      const actual = await readVramRect(page, 0, 0, 640, 400);
+      const wholeScreenOk = rectPlanesEqual(actual, expected);
+      results.push({ label: '【主目的】[bgcopy] コピー後の画面ページが背景ページの内容(非一様パターン)と画面全体・4プレーンとも完全一致', ok: wholeScreenOk, actual: wholeScreenOk ? '完全一致' : '不一致あり', expected: '完全一致' });
+      console.log(`${wholeScreenOk ? 'OK  ' : 'FAIL'} [bgcopy] コピー後の画面全体が背景と完全一致`);
+
+      // [陽性対照1] 背景パターンは単色の塗りつぶしではない(複数の色を使っている)ことの確認。
+      // 同じRplaneで、色10(赤+輝度)の帯があるy=0(0xFFのはず)と、
+      // どの矩形にも触れていないy=300(p98_clear(0)のまま=0x00のはず)を
+      // 比べる(違うプレーン同士を比べると、たまたま同じ0xFF/0x00に
+      // なる色の組み合わせを選んでしまい判定が意味を持たなくなる失敗を
+      // 実際に一度やった。docs/verify-log.md参照)。
+      const rowTop = await page.evaluate((a, l) => window.p98probe.readMemory(a, l), PLANE.R + 0 * ROW + 0, 1);
+      const rowUntouched = await page.evaluate((a, l) => window.p98probe.readMemory(a, l), PLANE.R + 300 * ROW + 0, 1);
+      const nonUniform = rowTop[0] !== rowUntouched[0];
+      results.push({ label: '[陽性対照] [bgcopy] 背景パターンは単色の塗りつぶしではない(Rplaneのy=0とy=300(未使用領域)が異なる値)', ok: nonUniform, actual: [rowTop[0], rowUntouched[0]], expected: '異なる値' });
+      console.log(`${nonUniform ? 'OK  ' : 'FAIL'} [陽性対照] [bgcopy] 背景パターンが非一様であることを確認 actual=[0x${rowTop[0]?.toString(16)}, 0x${rowUntouched[0]?.toString(16)}]`);
+
+      // [陽性対照2] コピー前に画面へ塗った色(6=赤+緑、背景のどの矩形にも
+      // 使っていない色)が、コピー後の画面全体には1箇所も残っていないこと
+      // (=コピーが実際に効いていて、単に「元から一致していた」わけではない)。
+      const precopy = buildUniformColorPlanes(6);
+      const precopyGone = !rectPlanesEqual(actual, precopy);
+      results.push({ label: '[陽性対照] [bgcopy] コピー前に画面へ塗った色(6)は画面全体には残っていない(コピーが実際に効いている)', ok: precopyGone, actual: precopyGone ? 'コピー前の色は残っていない' : 'コピー前の色のまま(コピーが効いていない)', expected: 'コピー前の色は残っていない' });
+      console.log(`${precopyGone ? 'OK  ' : 'FAIL'} [陽性対照] [bgcopy] コピー前の色が残っていないことを確認`);
+    });
+
+    console.log('\n--- 故障注入: probe_bgcopy(コピーを末尾1行分減らした版)は画面最下行の一致検査でFAILするはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.runProgram(`http://127.0.0.1:${port}/program/bgcopybroken.xdf`, 'PROBE_CB', { waitMs: 2000 }), PORT);
+      if (errors.length) console.log('page errors:', errors);
+
+      // 画面最下行(y=399)は、故障注入版ではコピーされないため、
+      // コピー前の色(6=赤+緑)のまま残っているはず(正常なら背景の
+      // 色9=青+輝度になる)。
+      const rowLast = await readVramRect(page, 0, 399, 640, 1);
+      const expectedLast = { w: 640, h: 1, wBytes: 80, planes: buildBgCopyExpectedPlanes().planes.map((p) => p.subarray(399 * 80, 400 * 80)) };
+      const leftover = !rectPlanesEqual(rowLast, expectedLast);
+      results.push({
+        label: '[bgcopy故障注入] 画面最下行(y=399)が背景と一致せず、コピー前の色が残る(検査が故障を検出できること)',
+        ok: leftover, actual: leftover ? '不一致(残像あり)' : '一致(検出できていない)', expected: '不一致',
+      });
+      console.log(`${leftover ? 'OK  ' : 'FAIL'} [bgcopy故障注入] 画面最下行に残像が残ることを検出`);
+    });
+
+    console.log('\n--- 背景ページ→画面ページのまるごとコピーのA/B速度比較(draw_tiled_background()を2回 vs 1回+コピー、REPEAT=3) ---');
+    {
+      // (a) walk2.cの起動時と同じやり方: draw_tiled_background_vram()を
+      //     背景ページ・画面ページへそれぞれ1回ずつ(計2回)。
+      // (b) draw_tiled_background_vram()を背景ページへ1回だけ+
+      //     p98_copy_bgpage_to_screen()でまるごとコピー。
+      // どちらも「タイル・タイル選択規則・座標順・REPEAT=3」を完全に揃え、
+      // 同じ固定オーバーヘッド(bgcopybench0=p98_init_bgpage+p98_quitのみ)
+      // との差分を取る。1ワードごとにポート0xA6のOUTを2回叩くコピー方式
+      // (VRAM/EGC経路のタイル敷き詰め自体の約1/8のfar call回数だが、
+      // OUTのI/Oウェイトが乗る)が、タイル敷き詰めをもう1回やるのと比べて
+      // 速いかどうかは自明ではないため、ここで実測する(docs/design.md参照。
+      // 結果がどちらであっても数値をそのまま記録する方針)。
+      const base0 = await measureRunTimes('bgcopybench0', 'PROBE_C0');
+      const twiceMs = await measureRunTimes('bgcopybench2x', 'PROBE_C2', 60000);
+      const copyMs = await measureRunTimes('bgcopybenchcopy', 'PROBE_CC', 60000);
+
+      const BGCOPY_REPEAT = 3; /* tests/probe_bgcopy_bench_{2x,copy}.c の REPEAT と一致させる */
+      const twicePerIterMs = (twiceMs - base0) / BGCOPY_REPEAT;
+      const copyPerIterMs = (copyMs - base0) / BGCOPY_REPEAT;
+      const twiceFps = twicePerIterMs > 0 ? 1000 / twicePerIterMs : Infinity;
+      const copyFps = copyPerIterMs > 0 ? 1000 / copyPerIterMs : Infinity;
+      console.log(`条件: 40x25=1000枚のVRAM/EGCタイル敷き詰めをREPEAT=${BGCOPY_REPEAT}回、同一座標順・同一タイル選択規則`);
+      console.log(`(a) draw_tiled_background_vram()を2回(背景+画面): baseline=${base0.toFixed(0)}ms, 本編=${twiceMs.toFixed(0)}ms → 1回あたり約${twicePerIterMs.toFixed(3)}ms ≈ 約${twiceFps.toFixed(2)}回/秒`);
+      console.log(`(b) draw_tiled_background_vram()を1回+p98_copy_bgpage_to_screen(): baseline=${base0.toFixed(0)}ms, 本編=${copyMs.toFixed(0)}ms → 1回あたり約${copyPerIterMs.toFixed(3)}ms ≈ 約${copyFps.toFixed(2)}回/秒`);
+      if (twicePerIterMs > 0 && copyPerIterMs > 0) {
+        console.log(`比((a)/(b)): (b)は(a)の約${(twicePerIterMs / copyPerIterMs).toFixed(2)}倍速い(1より大きければ(b)が速い。1未満なら(b)の方が遅い)`);
+      }
+      console.log('注意: これもnp2kai(WebNP2)+puppeteerというこの実行環境全体を通した相対値であり、実機での比率とは限らない。定性的な結論(速い/変わらない/遅い)のみ採る。数値が期待通りでなくても作り直さず、出た値をそのまま記録する(feedback_control_and_fault_injection.md)。');
+      const ok = Number.isFinite(twicePerIterMs) && twicePerIterMs > 0 && Number.isFinite(copyPerIterMs) && copyPerIterMs > 0;
+      results.push({
+        label: '背景ページ→画面ページのまるごとコピーのA/B速度比較が完了(具体的な数値・比率・どちらが速いかは合否判定の対象ではない。docs/verify-log.md参照)',
+        ok, actual: `(a)約${twiceFps.toFixed(2)}回/秒, (b)約${copyFps.toFixed(2)}回/秒`, expected: '両方とも正の値が計測できていること',
+      });
+      console.log(ok ? 'OK   背景ページコピーのA/B速度比較が完了' : 'FAIL 背景ページコピーのA/B速度比較に失敗(差分が0以下)');
     }
 
     // =====================================================================

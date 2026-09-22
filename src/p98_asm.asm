@@ -162,3 +162,63 @@ _p98__pokew4:
 
     o32 leave
     retf
+
+; p98__egc_copy_page(seg, srcOff, dstOff, wordCount, bgPage, screenPage) : void
+;   EGC有効中に呼ぶ想定(呼び出し側=src/p98.c の p98_copy_bgpage_to_screen()が
+;   p98__egc_restore_rect()と同じEGC設定(access=0,fgbg=0,ope=0x08F0,mask=0xFFFF,
+;   bg=0,sft=0,leng=0x000F)を先に済ませておく)。
+;
+;   「背景ページ→画面ページのまるごとコピー」用。p98__egc_restore_rect()
+;   (src/p98.c)は同じ発想をCの二重ループ+p98__peekw/p98__pokewで実装しており、
+;   1ワードごとにfar callが2回(peek/poke)+ポート0xA6のOUTが2回発生する。
+;   画面全体(400行×80バイト=16000ワード)をそれで流すとfar callだけで32000回
+;   かかるため、ループ自体をasm側へ落として呼び出し回数を1回(このfar call
+;   そのもの)にする狙いで追加した(2026-09、docs/design.md「背景ページ→画面
+;   ページのまるごとコピー」節参照)。
+;
+;   ループ内は「OUT(背景ページ)→ソースをワードで読む→OUT(画面ページ)→
+;   デストへワードで書く」を1ワードずつ繰り返す(p98__egc_restore_rect()と
+;   同じ順序をそのままasm化しただけ)。全画面コピーのようにsrcOff=dstOff=0・
+;   wordCount=16000(400行×80バイト/2)を渡せば、行の継ぎ目もオフセットが
+;   連続しているため1回のループで矩形(この場合は画面全体)ぜんたいをカバー
+;   できる(P98_BYTES_PER_LINE=80×P98_SCREEN_H=400=32000バイトはページ内で
+;   隙間無く連続しているため)。
+;
+;   ポート0xA6は既存の P98_PORT_DRAW_PAGE(src/p98.c)と同じ値であること
+;   (asm側では即値0xA6のまま使う。ずれるとページ切替が効かず内容が化ける)。
+;
+;   引数は他のプリミティブと同じ4バイトスロット([bp+8]=seg, [bp+12]=srcOff,
+;   [bp+16]=dstOff, [bp+20]=wordCount, [bp+24]=bgPage, [bp+28]=screenPage)。
+;   srcOff・dstOffは同じセグメント(=同一プレーン、seg一本)内のオフセットで、
+;   ページ(0xA6)の違いだけで背景/画面を読み分け・書き分ける。
+;   Cのポインタは渡さない(既存プリミティブと同じ方針。ファイル冒頭コメント参照)。
+    global _p98__egc_copy_page
+_p98__egc_copy_page:
+    push    ebp
+    movzx   ebp, sp
+    push    ds
+    mov     ax, [bp+8]      ; seg
+    mov     ds, ax
+    mov     es, ax
+    mov     si, [bp+12]     ; srcOff
+    mov     di, [bp+16]     ; dstOff
+    mov     cx, [bp+20]     ; wordCount
+    test    cx, cx
+    jz      .done
+.loop:
+    mov     dx, 0x0A6       ; P98_PORT_DRAW_PAGE と同じ値であること(src/p98.c参照)
+    mov     al, [bp+24]     ; bgPage
+    out     dx, al
+    mov     bx, [si]        ; ソースワードを読む(背景ページ側)
+    add     si, 2
+    mov     dx, 0x0A6
+    mov     al, [bp+28]     ; screenPage
+    out     dx, al
+    mov     [di], bx        ; デストへ書く(画面ページ側)
+    add     di, 2
+    dec     cx
+    jnz     .loop
+.done:
+    pop     ds
+    o32 leave
+    retf
