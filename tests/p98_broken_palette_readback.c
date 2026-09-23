@@ -1,4 +1,11 @@
 /*
+ * ★故障注入版(tests/p98_broken_palette_readback.c)★
+ * src/p98.c のコピーに対し、パレットの既定値決め打ち書き込みを元に戻し
+ * (修正前の)「ポートから読み出して退避 → 書き戻す」方式へ差し戻してある。
+ * tools/verify.mjsの陰性対照(「同じセッション内で2回連続実行すると2回目で
+ * 画面が一色に潰れる」不具合検査自体が、実際に壊れた実装をFAILとして
+ * 検出できることの確認)専用。通常のビルド・配布物には含めない。
+ *
  * p98.c - p98.h の実装。
  *
  * 設計方針(詳細は docs/design.md):
@@ -317,34 +324,12 @@ static int p98__diff_y = 0;
 static int p98__diff_byte_w = 0;
 static int p98__diff_h = 0;
 
-/* 起動直後(p98libのプログラムを1本も走らせていないFreeDOS)の既定パレット16色
- * (4bit値、0-15)。tests/probe_palette_default.c で実測して求めた値
- * (docs/verify-log.md参照。np2kai上での実測であり、実機PC-98の挙動そのもの
- * とは限らない)。
- *
- * 【なぜポートから読み出さないのか】
- * 以前はp98_init()でポート0xA8/0xAA/0xAC/0xAEから現在のパレットを読み出して
- * 退避し、p98_quit()でそれを書き戻していた。しかし実測の結果、
- * **np2kai上ではこの読み出しが実際のパレット値を返さない**ことが分かった
- * (docs/design.md「パレット」節、docs/verify-log.md参照)。具体的には、
- * 同じFreeDOSセッション内でp98libのプログラムを2回連続で実行すると、
- * 2回目のp98_init()内の読み出しが16色すべて同じ値を返し、その後の
- * p98_quit()がその同じ値を16色すべてへ書き込んでしまい、画面全体が
- * 一色に潰れて何も表示されなくなる不具合を実測で確認した。読み出しに
- * 一切頼らず、この既定値テーブルを毎回そのまま書き込む/書き戻す方式に
- * 変更し、何回実行しても同じ状態から始まるようにした。 */
-static const unsigned char p98__default_pal_r[16] = {
-     0,  0,  7,  7,  0,  0,  7,  7,
-     4,  0, 15, 15,  0,  0, 15, 15,
-};
-static const unsigned char p98__default_pal_g[16] = {
-     0,  0,  0,  0,  7,  7,  7,  7,
-     4,  0,  0,  0, 15, 15, 15, 15,
-};
-static const unsigned char p98__default_pal_b[16] = {
-     0,  7,  0,  7,  0,  7,  0,  7,
-     4, 15,  0, 15,  0, 15,  0, 15,
-};
+/* ★故障注入: 修正前の「読み出して退避」方式へ差し戻し★
+ * 本物のsrc/p98.cにあった既定パレットテーブル・その説明コメントは削除し、
+ * 修正前と同じ退避用配列に戻す。 */
+static unsigned char p98__saved_pal_g[16];
+static unsigned char p98__saved_pal_r[16];
+static unsigned char p98__saved_pal_b[16];
 
 static unsigned p98__saved_int23_seg;
 static unsigned p98__saved_int23_off;
@@ -442,14 +427,12 @@ int p98_init(void) {
         p98__hide_fkey_line();
     }
 
-    /* パレットを既定値へ明示的に書き込む(読み出して退避する方式は廃止。
-     * 上のp98__default_pal_r/g/b宣言のコメント参照)。何回p98_init()/
-     * p98_quit()を繰り返しても、常にこの既定値から始まる。 */
+    /* ★故障注入: パレットを退避(修正前の方式に差し戻し)★ */
     for (i = 0; i < 16; i++) {
         p98__outb(P98_PORT_PAL_INDEX, (unsigned char)i);
-        p98__outb(P98_PORT_PAL_GREEN, p98__default_pal_g[i]);
-        p98__outb(P98_PORT_PAL_RED, p98__default_pal_r[i]);
-        p98__outb(P98_PORT_PAL_BLUE, p98__default_pal_b[i]);
+        p98__saved_pal_g[i] = p98__inb(P98_PORT_PAL_GREEN);
+        p98__saved_pal_r[i] = p98__inb(P98_PORT_PAL_RED);
+        p98__saved_pal_b[i] = p98__inb(P98_PORT_PAL_BLUE);
     }
 
     /* INT 23h(Ctrl+C)を退避してから無害化ハンドラへ差し替える */
@@ -542,14 +525,12 @@ void p98_quit(void) {
     p98__int18_ah(0x11);
     p98__show_fkey_line();
 
-    /* パレットを既定値へ書き戻す(退避値ではなく、p98_init()と同じ既定値
-     * テーブルを使う。読み出して退避したものを戻さない理由は
-     * p98__default_pal_r/g/b宣言のコメント参照)。 */
+    /* ★故障注入: 退避した(=np2kaiでは実値を返さない)値を書き戻す★ */
     for (i = 0; i < 16; i++) {
         p98__outb(P98_PORT_PAL_INDEX, (unsigned char)i);
-        p98__outb(P98_PORT_PAL_GREEN, p98__default_pal_g[i]);
-        p98__outb(P98_PORT_PAL_RED, p98__default_pal_r[i]);
-        p98__outb(P98_PORT_PAL_BLUE, p98__default_pal_b[i]);
+        p98__outb(P98_PORT_PAL_GREEN, p98__saved_pal_g[i]);
+        p98__outb(P98_PORT_PAL_RED, p98__saved_pal_r[i]);
+        p98__outb(P98_PORT_PAL_BLUE, p98__saved_pal_b[i]);
     }
 
     p98__set_vector(0x23, p98__saved_int23_seg, p98__saved_int23_off);

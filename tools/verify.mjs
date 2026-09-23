@@ -206,6 +206,57 @@ function rectPlanesEqual(a, b) {
   return true;
 }
 
+// canvasの1点のRGBを読む(パレット回帰検査専用)。VRAMの生バイトではなく
+// 「実際に画面へどう表示されているか」を見るための唯一の手段
+// (パレット破壊はVRAMバイトには一切現れず、見た目にしか出ないため。
+// docs/design.md「パレット」節参照)。canvasはWebGL(preserveDrawingBuffer)
+// で描かれているため、そのまま2回getContext('2d')できない。ここでは
+// いったんオフスクリーンcanvasへdrawImage()でコピーしてから読む。
+async function readCanvasPixel(page, x, y) {
+  return page.evaluate(({ x, y }) => {
+    const src = document.querySelector('#screen');
+    const off = document.createElement('canvas');
+    off.width = src.width; off.height = src.height;
+    const ctx = off.getContext('2d');
+    ctx.drawImage(src, 0, 0);
+    const d = ctx.getImageData(x, y, 1, 1).data;
+    return [d[0], d[1], d[2]];
+  }, { x, y });
+}
+
+// 固定sleepでcanvasを読むと、FreeDOS初回起動時のディスクキャッシュの
+// 有無等で「まだ描画前」「もう次のプログラムに戻った後」のどちらに
+// 当たるか実行のたびにばらつき、実測で不安定だと分かった(tools/verify.mjs
+// 作成時の使い捨て検証スクリプトで、修正後の実装なのに2回目だけ黒
+// (=DOSプロンプトへ戻った後のテキスト画面)を誤検出した)。そこで
+// tools/verify.mjs内の他の非同期処理(readManyStable、walk.c節参照)と
+// 同じ考え方で、同じ値が連続するまでポーリングして安定した値を採る。
+//
+// 【2回連続一致では不十分だった】最初は「2回連続で同じ値」を安定判定に
+// 使ったところ、フルスイート実行時(他の重い検査の直後でホストが混んで
+// いる状態)に、プログラム起動直後のまだ何も描いていない黒画面が
+// たまたま2回連続で読めてしまい、それを「安定した値」と誤認する
+// (実際に描画された色を待たずに確定してしまう)ことがあった。
+// 連続一致に要する回数を3回(streak)に増やし、誤認の確率を下げた。
+async function pollStablePixel(page, x, y, { tries = 40, gapMs = 200, streak = 3 } = {}) {
+  let run = [];
+  for (let i = 0; i < tries; i++) {
+    const cur = await readCanvasPixel(page, x, y);
+    if (run.length && run[run.length - 1].every((v, j) => v === cur[j])) {
+      run.push(cur);
+      if (run.length >= streak) return cur;
+    } else {
+      run = [cur];
+    }
+    await sleep(gapMs);
+  }
+  return run[run.length - 1] ?? null;
+}
+
+function pixelsClose(a, b, tol = 4) {
+  return a.every((v, i) => Math.abs(v - b[i]) <= tol);
+}
+
 async function withPage(browser, url, fn) {
   const page = await browser.newPage();
   const pageErrors = [];
@@ -323,6 +374,7 @@ async function main() {
     stateCursorBrokenExe, cursorExe, cursorBrokenExe,
     fkeyExe, fkeyBrokenExe,
     bgcopyExe, bgcopyBrokenExe, bgcopyBench2xExe, bgcopyBenchCopyExe, bgcopyBench0Exe,
+    paletteRegressExe, paletteRegressBrokenExe,
   ] = await Promise.all([
     buildOrThrow('tests/probe_fill.c'),
     buildOrThrow('tests/probe_flip.c'),
@@ -369,8 +421,10 @@ async function main() {
     buildOrThrow('tests/probe_bgcopy_bench_2x.c'),
     buildOrThrow('tests/probe_bgcopy_bench_copy.c'),
     buildOrThrow('tests/probe_bgcopy_bench0.c'),
+    buildOrThrow('tests/probe_palette_regress.c'),
+    buildOrThrow('tests/probe_palette_regress.c', { libPath: join(REPO_ROOT, 'tests', 'p98_broken_palette_readback.c') }),
   ]);
-  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / probe_sprite_vram / probe_sprite_vram(故障注入=AND転送無し) / probe_sprite_bench_vram / probe_vram_upload_bytes / probe_vram_upload_bench / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_tilebg_bench_cpu / probe_tilebg_bench_vram / probe_tilebg_bench0 / probe_state(故障注入=カーソル復帰無し) / probe_bgcopy / probe_bgcopy(故障注入=末尾1行コピー漏れ) / probe_bgcopy_bench_2x / probe_bgcopy_bench_copy / probe_bgcopy_bench0');
+  console.log('ok: probe_fill / probe_flip / probe_state / probe_fill(故障注入=クリップ無し) / probe_key / probe_key(故障注入=差分無し) / probe_sprite / probe_sprite(故障注入=マスク無し) / probe_sprite(故障注入=クリップ無し) / probe_sprite_bench / probe_sprite_bench0 / probe_sprite_egc / probe_sprite_egc(故障注入=プレーン選択無し) / probe_sprite_bench_egc / probe_sprite_vram / probe_sprite_vram(故障注入=AND転送無し) / probe_sprite_bench_vram / probe_vram_upload_bytes / probe_vram_upload_bench / walk(デモ) / walk(故障注入=背景復帰無し) / probe_bgpage / probe_bgpage(故障注入=復元矩形1ドット縮小) / probe_bgpage_bench_full / probe_bgpage_bench_diff / probe_bgpage_bench0_bg / probe_walk2_assets / probe_walk2_assets(故障注入=R/Gプレーン入替) / walk2(デモ2、実素材) / probe_walk2_bench_full / probe_walk2_bench_diff / probe_walk2_bench0_bg / probe_tilebg_bench_cpu / probe_tilebg_bench_vram / probe_tilebg_bench0 / probe_state(故障注入=カーソル復帰無し) / probe_bgcopy / probe_bgcopy(故障注入=末尾1行コピー漏れ) / probe_bgcopy_bench_2x / probe_bgcopy_bench_copy / probe_bgcopy_bench0 / probe_palette_regress / probe_palette_regress(故障注入=パレット読み出し退避)');
 
   const programFds = {
     fill: programFdFor(fillExe, 'PROBE_FI'),
@@ -418,6 +472,8 @@ async function main() {
     bgcopybench2x: programFdFor(bgcopyBench2xExe, 'PROBE_C2'),
     bgcopybenchcopy: programFdFor(bgcopyBenchCopyExe, 'PROBE_CC'),
     bgcopybench0: programFdFor(bgcopyBench0Exe, 'PROBE_C0'),
+    paletteregress: programFdFor(paletteRegressExe, 'PALREG'),
+    paletteregressbroken: programFdFor(paletteRegressBrokenExe, 'PALREG'),
   };
 
   const server = await startServer(programFds);
@@ -496,9 +552,19 @@ async function main() {
       console.log('screen text (末尾):', JSON.stringify(text.split('\n').filter((l) => l.includes('BEF=') || l.includes('AFT=')).at(-1)));
       const after23 = await page.evaluate((addr, len) => window.p98probe.readMemory(addr, len), 0x8C, 4);
       const match = text.match(/BEF=([0-9A-F]{3})[\s\S]*AFT=([0-9A-F]{3})/);
-      const paletteRestored = !!match && match[1] === match[2];
-      results.push({ label: 'パレット(色番号1)がp98_quit後に元へ戻る', ok: paletteRestored, actual: match?.[2], expected: match?.[1] });
-      console.log(`${paletteRestored ? 'OK  ' : 'FAIL'} パレット(色番号1)がp98_quit後に元へ戻る BEF=${match?.[1]} AFT=${match?.[2]}`);
+      // 【2026-09後半、検査を変更】以前は「AFT(quit後)がBEF(init前)と一致する」を
+      // 合否条件にしていたが、これはp98_quit()が「読み出して退避した値を
+      // 書き戻す」実装だった頃の話。パレットの読み出し(0xAA/0xAC/0xAE)が
+      // np2kai上では実際の値を返さないことが分かり(docs/design.md「パレット」
+      // 節参照)、p98_init()/p98_quit()は退避・復元をやめ、実測した既定パレット
+      // 16色をそのまま書き込む/書き戻す方式に変更した。そのため今は
+      // 「AFT(quit後)が既知の既定値(色番号1はG=0,R=0,B=7)と一致する」を
+      // 検査する。BEFはこの新しい契約の下では意味を持たない参考値として
+      // 画面には残す(上のconsole.logでそのまま出力する)。
+      const PALETTE1_DEFAULT_GRB = '007'; // src/p98.cのp98__default_pal_g/r/b[1]と一致させる
+      const paletteRestored = !!match && match[2] === PALETTE1_DEFAULT_GRB;
+      results.push({ label: 'パレット(色番号1)がp98_quit後に既定値へ戻る', ok: paletteRestored, actual: match?.[2], expected: PALETTE1_DEFAULT_GRB });
+      console.log(`${paletteRestored ? 'OK  ' : 'FAIL'} パレット(色番号1)がp98_quit後に既定値へ戻る(参考)BEF=${match?.[1]} AFT=${match?.[2]} 期待値=${PALETTE1_DEFAULT_GRB}`);
       assertEqual('INT23hベクタはp98_quit後に元へ戻る(0000:008C)', after23, before23, results);
 
       const vMatch = text.match(/V0=([0-9A-F]{4})[\s\S]*V1=([0-9A-F]{4})[\s\S]*V2=([0-9A-F]{4})/);
@@ -641,6 +707,92 @@ async function main() {
       });
       console.log(`${detected ? 'OK  ' : 'FAIL'} [fkey故障注入] 復帰忘れを検出 actual=${JSON.stringify(shownChar)}`);
       if (errors.length) console.log('page errors(fkeybroken):', errors);
+    });
+
+    // パレット退避廃止の回帰検査(2026-09後半)。
+    //
+    // 【不具合】同じFreeDOSセッション内でp98libのプログラムを2回連続で
+    // 実行すると、2回目以降が画面全体一色に潰れて何も表示されなくなる
+    // 不具合を実測で確認した(docs/design.md「パレット」節、
+    // docs/verify-log.md参照)。原因はp98_init()がポート0xA8/0xAA/0xAC/0xAE
+    // から現在のパレットを読み出して退避していたが、np2kai上ではこの
+    // 読み出しが実際の値を返さず、p98_quit()がその不正な値を16色すべてへ
+    // 書き戻してしまうこと。対処として、読み出しには一切頼らず、実測した
+    // 既定パレット16色を毎回そのまま書き込む方式(tests/probe_palette_
+    // default.c、docs/verify-log.md参照)へ変更した。
+    //
+    // 【検証の穴】既存の検証(probe_state.c、上の「初期化/終了の状態退避・
+    // 復元」節参照)は「1プログラム=1回起動」でしか回っておらず、
+    // 「同じ起動の中で2本目を走らせる」条件が一度も作られていなかったため、
+    // この不具合を検出できなかった。さらに、既存の検査はVRAMの生バイトだけを
+    // 比較しており、パレット破壊はVRAMバイトには一切現れず「見た目」にしか
+    // 出ないため、仮に2回実行していたとしても素通りしていた。
+    //
+    // 【検査方法】tests/probe_palette_regress.cを同一セッション内で2回連続
+    // 実行し、canvasの同じ座標の色が2回とも一致することを確認する
+    // (VRAMバイトではなくcanvasのピクセルで見るのが今回の主眼)。
+    console.log('\n--- パレット退避廃止の回帰検査(probe_palette_regress: 同一セッションで2回連続実行しても見た目が変わらない) ---');
+    const PALETTE_SAMPLE_X = 320, PALETTE_SAMPLE_Y = 200;
+    // tests/probe_palette_default.cの実測(docs/verify-log.md参照)による、
+    // 色5の既定パレット(4bit r=0,g=7,b=7)がnp2kai上でcanvasに実際どう
+    // 描かれるかの実測値。陽性対照(1回目が本当に正常か)の比較基準に使う。
+    const PALETTE_COLOR5_EXPECTED = [0, 117, 115];
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/paletteregress.xdf`), PORT);
+
+      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PALREG'));
+      await sleep(1200);
+      const pixel1 = await pollStablePixel(page, PALETTE_SAMPLE_X, PALETTE_SAMPLE_Y);
+      const positiveControlOk = pixelsClose(pixel1, PALETTE_COLOR5_EXPECTED);
+      results.push({
+        label: '[陽性対照][パレット回帰] 1回目の実行は既定パレット相当の色で表示される(計器が壊れていないことの確認)',
+        ok: positiveControlOk, actual: JSON.stringify(pixel1), expected: `${JSON.stringify(PALETTE_COLOR5_EXPECTED)}近辺`,
+      });
+      console.log(`${positiveControlOk ? 'OK  ' : 'FAIL'} [陽性対照][パレット回帰] 1回目の色 actual=${JSON.stringify(pixel1)}`);
+      await page.evaluate((b) => window.p98probe.waitPrompt(b, 20000), baseline2);
+
+      const baseline3 = await page.evaluate(() => window.p98probe.runNoWait('PALREG'));
+      await sleep(1200);
+      const pixel2 = await pollStablePixel(page, PALETTE_SAMPLE_X, PALETTE_SAMPLE_Y);
+      const ok = pixelsClose(pixel1, pixel2);
+      results.push({
+        label: '【主目的】[パレット回帰] 同一セッションで2回連続実行しても2回目の見た目が1回目と一致する',
+        ok, actual: JSON.stringify(pixel2), expected: `${JSON.stringify(pixel1)}近辺`,
+      });
+      console.log(`${ok ? 'OK  ' : 'FAIL'} 【主目的】[パレット回帰] 1回目=${JSON.stringify(pixel1)} 2回目=${JSON.stringify(pixel2)}`);
+      await page.evaluate((b) => window.p98probe.waitPrompt(b, 20000), baseline3);
+      if (errors.length) console.log('page errors(paletteregress):', errors);
+    });
+
+    console.log('\n--- 故障注入: probe_palette_regress(p98_broken_palette_readback版)は2回目で色が崩れるはず ---');
+    await withPage(browser, `http://127.0.0.1:${PORT}/ide/p98-probe.html`, async (page, errors) => {
+      await page.evaluate((port) => window.p98probe.boot(`http://127.0.0.1:${port}/program/paletteregressbroken.xdf`), PORT);
+
+      const baseline2 = await page.evaluate(() => window.p98probe.runNoWait('PALREG'));
+      await sleep(1200);
+      const pixel1 = await pollStablePixel(page, PALETTE_SAMPLE_X, PALETTE_SAMPLE_Y);
+      // 陽性対照: 故障は2回目以降にしか出ないはずなので、1回目は
+      // 正常(=修正後と同じ既定パレット相当の色)であることをまず確認する
+      // (タスクの前提「1回目が正常であることを確認してから2回目を測る」)。
+      const positiveControlOk = pixelsClose(pixel1, PALETTE_COLOR5_EXPECTED);
+      results.push({
+        label: '[陽性対照][パレット回帰故障注入] 1回目は故障注入版でも正常な色で表示される',
+        ok: positiveControlOk, actual: JSON.stringify(pixel1), expected: `${JSON.stringify(PALETTE_COLOR5_EXPECTED)}近辺`,
+      });
+      console.log(`${positiveControlOk ? 'OK  ' : 'FAIL'} [陽性対照][パレット回帰故障注入] 1回目の色 actual=${JSON.stringify(pixel1)}`);
+      await page.evaluate((b) => window.p98probe.waitPrompt(b, 20000), baseline2);
+
+      const baseline3 = await page.evaluate(() => window.p98probe.runNoWait('PALREG'));
+      await sleep(1200);
+      const pixel2 = await pollStablePixel(page, PALETTE_SAMPLE_X, PALETTE_SAMPLE_Y);
+      const detected = !pixelsClose(pixel1, pixel2);
+      results.push({
+        label: '[パレット回帰故障注入] パレットを読み出して退避する方式に戻すと2回目で見た目が崩れる(検出できる)',
+        ok: detected, actual: JSON.stringify(pixel2), expected: `not ${JSON.stringify(pixel1)}近辺`,
+      });
+      console.log(`${detected ? 'OK  ' : 'FAIL'} [パレット回帰故障注入] 1回目=${JSON.stringify(pixel1)} 2回目=${JSON.stringify(pixel2)}(崩れを検出)`);
+      await page.evaluate((b) => window.p98probe.waitPrompt(b, 20000), baseline3);
+      if (errors.length) console.log('page errors(paletteregressbroken):', errors);
     });
 
     console.log('\n--- キーボード (probe_key: down/pressed/release/複数同時/getch/長押しリピート耐性) ---');
